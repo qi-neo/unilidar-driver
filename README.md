@@ -184,3 +184,5 @@ ROS 适配层、63 项自检、`udp_probe` 探针、回环测试、方法论文�
 ## 许可证
 
 原创部分 MIT（见 `LICENSE`），派生部分的第三方义务见 `NOTICE`。
+
+版本变更记录在 [`CHANGELOG.md`](CHANGELOG.md)。
