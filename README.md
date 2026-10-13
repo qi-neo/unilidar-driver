@@ -92,10 +92,15 @@ clang++ -std=c++17 -Wall -Wextra -Wpedantic -O1 -I src/unilidar_driver/include \
 
 ```
 unilidar-driver/
+├── .github/workflows/
+│   └── ci.yml                    CI：双编译器 × sanitizer + UDP 回环
 ├── docs/
-│   └── driver-design.md      《如何编写一个激光雷达驱动》思路文档
-├── src/unilidar_driver/       ROS2 包
-│   ├── include/unilidar_driver/   协议、解析、解码、收包（不依赖 ROS）
+│   └── driver-design.md          《如何编写一个激光雷达驱动》思路文档
+├── tests/
+│   ├── udp_loopback_test.sh      UDP 回环集成测试（udp_receiver 的唯一覆盖）
+│   └── send_synthetic_packets.py 回环测试的合成报文发送端
+├── src/unilidar_driver/           ROS2 包
+│   ├── include/unilidar_driver/     协议、解析、解码、收包（不依赖 ROS）
 │   ├── src/                       实现 + unilidar_driver_node.cpp（ROS 薄节点）
 │   ├── examples/
 │   │   ├── decoder_selftest.cpp   63 项断言的离线自检
@@ -109,6 +114,30 @@ unilidar-driver/
 帧定界的几种做法与推荐组合、各层的具体坑、如何在不接硬件的情况下验证。
 文中每个坑都来自本项目的真实开发过程，不是泛泛的最佳实践。
 
+## 持续集成
+
+[![CI](https://github.com/qi-neo/unilidar-driver/actions/workflows/ci.yml/badge.svg)](https://github.com/qi-neo/unilidar-driver/actions/workflows/ci.yml)
+
+`.github/workflows/ci.yml`，两个 job：
+
+| Job | 内容 |
+|---|---|
+| `core` | clang++ 与 g++ 两种编译器 × 普通 / ASan+UBSan 两种构建，共 4 个组合。`-Werror` 强制零警告，跑 63 项自检，另编译探针确认可用 |
+| `udp-loopback` | 真实 UDP 回环集成测试，再叠 ASan/UBSan 跑一遍 |
+
+**CI 不需要 ROS。** 解析核心源码层面不出现 ROS 头文件，所以一条 `clang++` 命令加一次执行就能覆盖协议、解析、解码三层，不需要 ROS 容器。
+
+回环测试是 `udp_receiver.cpp` 唯一的自动化覆盖：63 项自检直接喂字节给解析器，不经过 socket，而缓冲、超时、来源地址只有真收发才能验证。测试资产在 `tests/`：
+
+```bash
+bash tests/udp_loopback_test.sh                                    # 普通构建
+EXTRA_CXXFLAGS="-fsanitize=address,undefined -g" \
+  bash tests/udp_loopback_test.sh                                  # 叠加 sanitizer
+```
+
+**CI 未覆盖**：ROS 节点的编译与运行。那需要 ROS 环境，代价远高于核心库，
+留待后续在有 ROS 的 runner 上补。
+
 ## 已验证 / 未验证
 
 本机没有 ROS，也不在车旁，验证范围如下，不夸大：
@@ -120,7 +149,8 @@ unilidar-driver/
 | 点云几何换算 | 退化标定下与解析解逐点比对（仰角 30° 时 z 应为 0.5） |
 | 自检自身有效性 | 变异测试：3 处人为破坏全部被对应断言抓住 |
 | `udp_receiver` + 解析器 + 探针 | 真实 UDP 回环：7 包收到、6 帧解出、1 帧 CRC 损坏被拒 |
-| 解析核心编译 | `-Wall -Wextra -Wpedantic` 零警告 |
+| 解析核心编译 | `-Wall -Wextra -Wpedantic -Werror` 零警告，clang 与 g++ 均过 |
+| 内存与未定义行为 | ASan + UBSan 下自检与回环测试均无报告 |
 | **ROS 节点编译运行** | **未验证**，需在装 ROS 的机器 `colcon build` |
 | **接真实雷达** | **未验证**，需按探针流程核对 |
 

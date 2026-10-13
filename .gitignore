@@ -23,3 +23,8 @@ __pycache__/
 *.pcd
 *.csv
 lidar_dump.bin
+
+# 本地构建产物
+udp_probe
+decoder_selftest
+*.dSYM/

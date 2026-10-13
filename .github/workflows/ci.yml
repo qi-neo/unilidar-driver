@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一分支上新的推送取消正在跑的旧任务，省额度
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: 核心库自检（${{ matrix.cxx }}${{ matrix.sanitizer == 'asan' && ' + ASan/UBSan' || '' }}）
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cxx: [clang++, g++]
+        sanitizer: ["", "asan"]
+    steps:
+      - uses: actions/checkout@v4
+
+      # 核心库不依赖 ROS，也不需要 PCL，所以这里不用装任何东西，
+      # 一条编译命令加一次执行就能覆盖协议、解析、解码三层。
+      - name: 编译并运行 63 项离线自检
+        run: |
+          set -e
+          EXTRA=""
+          if [ "${{ matrix.sanitizer }}" = "asan" ]; then
+            EXTRA="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+          fi
+          ${{ matrix.cxx }} -std=c++17 -Wall -Wextra -Wpedantic -Werror -O1 $EXTRA \
+            -I src/unilidar_driver/include \
+            src/unilidar_driver/examples/decoder_selftest.cpp \
+            src/unilidar_driver/src/protocol.cpp \
+            src/unilidar_driver/src/packet_parser.cpp \
+            src/unilidar_driver/src/frame_decoder.cpp \
+            src/unilidar_driver/src/udp_receiver.cpp \
+            -o decoder_selftest
+          # 开了 ASan 时顺便查泄漏；没开时这个变量被忽略
+          ASAN_OPTIONS=detect_leaks=1 ./decoder_selftest
+
+      - name: 编译探针并确认可用
+        run: |
+          set -e
+          EXTRA=""
+          if [ "${{ matrix.sanitizer }}" = "asan" ]; then
+            EXTRA="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+          fi
+          ${{ matrix.cxx }} -std=c++17 -Wall -Wextra -Wpedantic -Werror -O1 $EXTRA \
+            -I src/unilidar_driver/include \
+            src/unilidar_driver/examples/udp_probe.cpp \
+            src/unilidar_driver/src/protocol.cpp \
+            src/unilidar_driver/src/packet_parser.cpp \
+            src/unilidar_driver/src/udp_receiver.cpp \
+            -o udp_probe
+          ./udp_probe --help > /dev/null
+
+  udp-loopback:
+    name: UDP 回环集成测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # decoder_selftest 直接喂字节给解析器，不经过 socket；
+      # udp_receiver.cpp 只有这一处覆盖。
+      - name: 回环测试
+        run: bash tests/udp_loopback_test.sh
+
+      # 同一套用例再叠 ASan/UBSan 跑一遍，给 socket 收包路径加内存安全覆盖
+      - name: 回环测试（ASan/UBSan）
+        run: |
+          EXTRA_CXXFLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
+            ASAN_OPTIONS=detect_leaks=1 \
+            bash tests/udp_loopback_test.sh
