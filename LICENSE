@@ -2,6 +2,9 @@ MIT License
 
 Copyright (c) 2026 qi-neo
 
+本许可证适用于本项目的原创部分。两个文件包含派生自 Unitree Robotics
+BSD-3-Clause 开源代码的内容，那两部分受其原始许可证约束，详见 NOTICE。
+
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction, including without limitation the rights

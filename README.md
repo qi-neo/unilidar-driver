@@ -154,27 +154,33 @@ EXTRA_CXXFLAGS="-fsanitize=address,undefined -g" \
 | **ROS 节点编译运行** | **未验证**，需在装 ROS 的机器 `colcon build` |
 | **接真实雷达** | **未验证**，需按探针流程核对 |
 
-## 协议来源
+## 协议来源与许可证
 
-字段布局与点云几何公式参考官方开源的 `unitree_lidar_protocol.h` 与
-`unitree_lidar_utilities.h`（均属 `unitree_lidar_sdk2`，BSD-3-Clause），
-本仓库按其公开内容自行重述，**运行时不链接、不调用、不 include 官方任何文件**。
+字段布局与点云几何公式来自官方开源的 `unitree_lidar_protocol.h` 与
+`unitree_lidar_utilities.h`（均属 `unitree_lidar_sdk2`，BSD-3-Clause）。
+本仓库按其公开内容自行实现，**运行时不链接、不调用、不 include 官方任何文件**。
 
-需要说清的是，这两处确实来自官方而非我原创：
+需要说清的是，以下两处确实派生自官方而非原创：
 
-| 内容 | 来源 |
-|---|---|
-| 报文结构体字段布局（`protocol.hpp`） | 按官方公开字段重述，改为 1 字节打包 |
-| 点云 x/y/z 几何公式（`frame_decoder.cpp`） | 取自官方 `parseFromPacketToPointCloud` |
+| 文件 | 派生自 | 内容 |
+|---|---|---|
+| `protocol.hpp` | `unitree_lidar_protocol.h` | 报文结构体字段与顺序、报文类型常量、帧头帧尾标识字节 |
+| `frame_decoder.cpp` | `unitree_lidar_utilities.h` 的 `parseFromPacketToPointCloud` | 测距值换算、角度迭代、无效点与距离门限判定、双棱镜机构到 XYZ 的投影公式 |
 
-除此之外全部是自研实现：socket 封装、帧定界与重同步、越界保护、统计诊断、
-ROS 适配层、63 项自检、`udp_probe` 探针。协议字段布局和双棱镜几何属于
-"设备通信格式的规格"而非"官方的实现"——同一种硬件只有一种正确解释方式，
-BSD-3-Clause 也允许这样使用。
+除此之外全部是自研实现：socket 封装、帧定界与重同步、三道越界保护、统计诊断、
+ROS 适配层、63 项自检、`udp_probe` 探针、回环测试、方法论文档。
+其中 CRC32 是标准 CRC-32/ISO-HDLC，属公开标准算法，不专属任何厂商。
+
+两个派生文件的头部均已按 BSD-3-Clause 第 1 条**保留原始版权声明**，并逐项列出
+相对原始实现的改动，可自行比对。完整的许可证文本、派生范围清单与原创部分
+清单见 [`NOTICE`](NOTICE)。
+
+许可证分工：本项目原创部分为 MIT（见 [`LICENSE`](LICENSE)），上述两个文件的
+派生部分仍受 Unitree Robotics 的 BSD-3-Clause 约束。
 
 相对官方实现的关键差异是**帧定界策略**：本驱动不拿整包长度当判据，
 因为官方头文件里的字节数注释与其自身字段并不一致（详见上文）。
 
 ## 许可证
 
-MIT
+原创部分 MIT（见 `LICENSE`），派生部分的第三方义务见 `NOTICE`。
