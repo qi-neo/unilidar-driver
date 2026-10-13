@@ -124,8 +124,24 @@ unilidar-driver/
 
 ## 协议来源
 
-字段布局参考官方开源的 `unitree_lidar_protocol.h`（BSD-3-Clause），
-本仓库按其公开字段自行重述，运行时不链接官方静态库。
+字段布局与点云几何公式参考官方开源的 `unitree_lidar_protocol.h` 与
+`unitree_lidar_utilities.h`（均属 `unitree_lidar_sdk2`，BSD-3-Clause），
+本仓库按其公开内容自行重述，**运行时不链接、不调用、不 include 官方任何文件**。
+
+需要说清的是，这两处确实来自官方而非我原创：
+
+| 内容 | 来源 |
+|---|---|
+| 报文结构体字段布局（`protocol.hpp`） | 按官方公开字段重述，改为 1 字节打包 |
+| 点云 x/y/z 几何公式（`frame_decoder.cpp`） | 取自官方 `parseFromPacketToPointCloud` |
+
+除此之外全部是自研实现：socket 封装、帧定界与重同步、越界保护、统计诊断、
+ROS 适配层、63 项自检、`udp_probe` 探针。协议字段布局和双棱镜几何属于
+"设备通信格式的规格"而非"官方的实现"——同一种硬件只有一种正确解释方式，
+BSD-3-Clause 也允许这样使用。
+
+相对官方实现的关键差异是**帧定界策略**：本驱动不拿整包长度当判据，
+因为官方头文件里的字节数注释与其自身字段并不一致（详见上文）。
 
 ## 许可证
 
