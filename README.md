@@ -2,7 +2,9 @@
 
 自行实现的 [Unitree L1](https://www.unitree.com/products/unilidar)（宇树 4D LiDAR）
 ROS2 驱动：收 UDP 报文、解成标准 `PointCloud2` 与 `Imu` 话题。
-**不链接官方静态库 `libunitree_lidar_sdk.a`**，报文解析与几何换算全部自己实现。
+**不链接官方静态库 `libunitree_lidar_sdk.a`**，报文解析逻辑全部自己实现；
+协议字段布局与点云几何公式依据官方开源头文件（BSD-3-Clause）重述，
+详见文末[协议来源](#协议来源)。
 
 [驱动编写思路](docs/driver-design.md)
 
