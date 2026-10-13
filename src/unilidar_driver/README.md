@@ -7,8 +7,8 @@
 两处的来源在代码注释与仓库根目录 README 的「协议来源」一节均有注明。
 
 > 想看**方法论**（驱动职责边界、四层架构、帧定界怎么选、各层的坑、
-> 不接硬件怎么验证），读仓库根目录的
-> [`docs/driver-design.md`](../../../docs/driver-design.md)。
+> 不接硬件怎么验证），读
+> [`docs/driver-design.md`](https://github.com/qi-neo/unilidar-driver/blob/main/docs/driver-design.md)。
 > 本文只讲这个包本身怎么用。
 
 ## 为什么要自己写
