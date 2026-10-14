@@ -5,11 +5,28 @@
 
 ## [未发布]
 
+### 修复
+
+- `package.xml` 补 `geometry_msgs` 依赖。节点用
+  `geometry_msgs::msg::TransformStamped` 做 TF 广播，CMakeLists 早已
+  `find_package(geometry_msgs REQUIRED)`，但 package.xml 一直没声明。
+  **1.0.0 就有这个问题**——按该 tag 拉下来的包，rosdep 装不全环境，
+  已由 1.0.1 修正。
+
+### 新增
+
+- `tools/check_deps.py` 与对应的 CI job：核对 CMakeLists 的 `find_package`
+  与 package.xml 的依赖声明是否一致，漏声明即失败。纯文本检查，不需要 ROS。
+  就是为防上面那类脱节复发而加的。
+
 ### 修改
 
 - 包内 README 的方法论文档链接由相对路径 `../../../docs/driver-design.md` 改为
   GitHub 绝对链接。原路径只在驱动仓库成立，而悬架仓库保留了一份驱动副本，
   照搬过去会变成死链；改后两边都能打开，且两份副本可逐字节一致。
+- README 的验证范围表：ROS 节点编译一项由「未验证」改为已通过——
+  悬架仓的 ROS CI 在 Humble 干净环境下编译了同一份代码。节点**实机运行**
+  与接真实雷达仍标注为未验证。
 
 ## [1.0.0] - 2026-10-13
 

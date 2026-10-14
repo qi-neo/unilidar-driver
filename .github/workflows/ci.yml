@@ -13,6 +13,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  deps:
+    name: 依赖声明一致性
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rosdep 的唯一依据是 package.xml。CMakeLists 里 find_package 了但
+      # package.xml 没声明的，在开发机上看不出来（别的包或全局环境已经装上），
+      # 到了干净环境里 rosdep 不装它才炸。v1.0.0 就因为漏声明 geometry_msgs
+      # 发布过一版装不全依赖的包，所以这里加一道纯文本检查，不需要 ROS。
+      - name: CMakeLists 与 package.xml 对齐
+        run: python3 tools/check_deps.py
+
   core:
     name: 核心库自检（${{ matrix.cxx }}${{ matrix.sanitizer == 'asan' && ' + ASan/UBSan' || '' }}）
     runs-on: ubuntu-latest

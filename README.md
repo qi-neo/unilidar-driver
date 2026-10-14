@@ -140,7 +140,7 @@ EXTRA_CXXFLAGS="-fsanitize=address,undefined -g" \
 
 ## 已验证 / 未验证
 
-本机没有 ROS，也不在车旁，验证范围如下，不夸大：
+本机没有 ROS，也不在车旁。能在 CI 里验证的都由 CI 持续跑，其余如实标注：
 
 | 项目 | 状态 |
 |---|---|
@@ -151,7 +151,9 @@ EXTRA_CXXFLAGS="-fsanitize=address,undefined -g" \
 | `udp_receiver` + 解析器 + 探针 | 真实 UDP 回环：7 包收到、6 帧解出、1 帧 CRC 损坏被拒 |
 | 解析核心编译 | `-Wall -Wextra -Wpedantic -Werror` 零警告，clang 与 g++ 均过 |
 | 内存与未定义行为 | ASan + UBSan 下自检与回环测试均无报告 |
-| **ROS 节点编译运行** | **未验证**，需在装 ROS 的机器 `colcon build` |
+| ROS 节点编译 | 已在 ROS Humble 干净环境下 `colcon build` 通过（由 [悬架仓 CI](https://github.com/qi-neo/active-suspension-lidar-preview/actions) 编译同一份代码，见其 `unilidar_driver` 包；本仓库 CI 不含 ROS 环节） |
+| CMakeLists 与 package.xml 依赖一致 | CI 每次运行核对，漏声明即失败 |
+| **ROS 节点实机运行** | **未验证**，需接雷达后按探针流程核对 |
 | **接真实雷达** | **未验证**，需按探针流程核对 |
 
 ## 协议来源与许可证
