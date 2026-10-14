@@ -5,13 +5,20 @@
 
 ## [未发布]
 
+暂无。
+
+## [1.0.1] - 2026-10-14
+
+依赖修复版本。**若你用的是 1.0.0，请直接换到本版本**——1.0.0 的
+`package.xml` 漏声明 `geometry_msgs`，按该 tag 拉下来的包 rosdep 装不全环境。
+
 ### 修复
 
 - `package.xml` 补 `geometry_msgs` 依赖。节点用
   `geometry_msgs::msg::TransformStamped` 做 TF 广播，CMakeLists 早已
   `find_package(geometry_msgs REQUIRED)`，但 package.xml 一直没声明。
-  **1.0.0 就有这个问题**——按该 tag 拉下来的包，rosdep 装不全环境，
-  已由 1.0.1 修正。
+  **1.0.0 就有这个问题**，本版本修复。开发机上不易发现，因为别的包或
+  全局环境往往已经把依赖带上了。
 
 ### 新增
 
