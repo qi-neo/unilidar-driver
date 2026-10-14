@@ -118,10 +118,11 @@ unilidar-driver/
 
 [![CI](https://github.com/qi-neo/unilidar-driver/actions/workflows/ci.yml/badge.svg)](https://github.com/qi-neo/unilidar-driver/actions/workflows/ci.yml)
 
-`.github/workflows/ci.yml`，两个 job：
+`.github/workflows/ci.yml`，三个 job：
 
 | Job | 内容 |
 |---|---|
+| `deps` | 依赖声明一致性：核对 `CMakeLists.txt` 的 `find_package` 与 `package.xml` 的依赖声明，漏声明即失败。见 `tools/check_deps.py` |
 | `core` | clang++ 与 g++ 两种编译器 × 普通 / ASan+UBSan 两种构建，共 4 个组合。`-Werror` 强制零警告，跑 63 项自检，另编译探针确认可用 |
 | `udp-loopback` | 真实 UDP 回环集成测试，再叠 ASan/UBSan 跑一遍 |
 
