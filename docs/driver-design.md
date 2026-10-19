@@ -127,7 +127,12 @@ UDP 是无连接的，返回 0 只表示超时内没数据，不代表连接断�
 
 报文里通常有自增序号，用于发现丢包。
 注意：**只在同一种报文类型之间比较**。点云和 IMU 各有各的序号序列，
-混在一起比会永远误报丢包。
+混在一起比会永远误报丢包。所以状态要按 `packet_type` 分开存。
+
+序号异常要分三类记，含义不能混：
+`seq > last + 1` 是丢包（`seq_gaps`）、`seq == last` 是重复包、`seq < last`
+是乱序（`out_of_order`）。重复包在 CRC 校验通过后直接丢弃——同一扫描线被
+计两次比丢一帧更难查；乱序包本身数据有效，仍交付但顺序不可信。
 
 ### 3.3 解码层：把帧变成有物理意义的量
 
@@ -200,10 +205,10 @@ std::memcpy(&pkt, frame.data(), copy_len);         // 只拷实际有的
 - 数据分批到达（模拟 UDP 分片或串口流式）
 - 前面有垃圾字节（重同步）
 - `point_num` 越界、包长不足
-- 序号跳变
+- 序号跳变、重复包、乱序包
 - CRC32 对**已知测试向量**：`"123456789"` 应得 `0xCBF43926`
 
-本项目 `decoder_selftest.cpp` 有 69 项这样的断言。
+本项目 `decoder_selftest.cpp` 有 91 项这样的断言。
 
 **2. 变异测试，验证自检本身有效。**
 写完自检一定要确认它抓得住错——否则是假绿灯。
@@ -266,7 +271,7 @@ src/unilidar_driver/
 │   └── udp_receiver.hpp    POSIX UDP 收包
 ├── src/                    以上实现 + unilidar_driver_node.cpp（唯一碰 ROS 的文件）
 ├── examples/
-│   ├── decoder_selftest.cpp  69 项断言的离线自检
+│   ├── decoder_selftest.cpp  91 项断言的离线自检
 │   └── udp_probe.cpp         实测定界探针
 ├── launch/ config/
 └── README.md

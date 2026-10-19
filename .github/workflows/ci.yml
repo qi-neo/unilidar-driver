@@ -39,7 +39,7 @@ jobs:
 
       # 核心库不依赖 ROS，也不需要 PCL，所以这里不用装任何东西，
       # 一条编译命令加一次执行就能覆盖协议、解析、解码三层。
-      - name: 编译并运行 69 项离线自检
+      - name: 编译并运行 91 项离线自检
         run: |
           set -e
           EXTRA=""
@@ -90,3 +90,71 @@ jobs:
           EXTRA_CXXFLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
             ASAN_OPTIONS=detect_leaks=1 \
             bash tests/udp_loopback_test.sh
+
+  ros:
+    name: ROS 节点编译（Humble 容器）
+    runs-on: ubuntu-latest
+    # 上面三个 job 只编译不依赖 ROS 的核心库，ROS 节点从未进过 CI：
+    # rclcpp API 用错、package.xml 漏依赖、CMake 链接问题都只能在用户机器上暴露。
+    # 这里用官方 Humble 基础镜像真正 colcon build 一遍节点。
+    container:
+      image: ros:humble-ros-base
+    defaults:
+      run:
+        # 容器 job 默认用 sh，而 source /opt/ros/... 需要 bash
+        shell: bash
+    steps:
+      # 官方镜像不保证带 git / colcon / rosdep，而 actions/checkout 自己就依赖 git，
+      # 所以先装工具再 checkout。这一步不需要仓库文件，放在 checkout 之前是安全的。
+      - name: 安装 git / colcon / rosdep / 编译工具
+        run: |
+          set -eo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            git build-essential cmake python3-colcon-common-extensions python3-rosdep
+          # 容器里以 root 跑，checkout 的工作区可能与当前用户不同属，先放行
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - uses: actions/checkout@v4
+
+      - name: rosdep 安装依赖并 colcon build
+        run: |
+          set -eo pipefail
+          source /opt/ros/humble/setup.bash
+          # 官方镜像里 rosdep 的源列表不一定初始化过，缺了就补一次
+          if [ ! -e /etc/ros/rosdep/sources.list.d/20-default.list ]; then
+            rosdep init
+          fi
+          rosdep update
+          # 按 package.xml 装齐 rclcpp / sensor_msgs / tf2 / tf2_ros / geometry_msgs
+          # 等依赖。漏声明在这里就会暴露，比在用户机器上炸强。
+          rosdep install --from-paths src --ignore-src -r -y
+          colcon build --packages-select unilidar_driver --event-handlers console_direct+
+
+      - name: 确认产物可执行并验证参数校验
+        run: |
+          set -eo pipefail
+          source /opt/ros/humble/setup.bash
+          BIN=install/unilidar_driver/lib/unilidar_driver
+          test -x "$BIN/unilidar_driver_node"
+          test -x "$BIN/decoder_selftest"
+          test -x "$BIN/udp_probe"
+          # 装出来的自检与探针也能跑，确认没有链接问题
+          "$BIN/decoder_selftest"
+          "$BIN/udp_probe" --help > /dev/null
+
+          # 参数校验要 FATAL 后以非 0 退出，而不是静默回退：用越界端口启动节点，
+          # 期望进程失败且日志里出现「参数非法」。这条同时验证了节点能真正跑起来。
+          set +e
+          OUT=$(timeout 20 "$BIN/unilidar_driver_node" --ros-args -p local_port:=70000 2>&1)
+          RC=$?
+          set -e
+          printf '%s\n' "$OUT"
+          if [ "$RC" -eq 0 ]; then
+            echo "参数校验未生效：local_port=70000 时节点仍以退出码 0 结束"
+            exit 1
+          fi
+          if ! printf '%s' "$OUT" | grep -q "参数非法"; then
+            echo "节点非 0 退出，但不是因为参数校验失败（日志中没有『参数非法』）"
+            exit 1
+          fi

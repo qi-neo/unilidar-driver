@@ -33,7 +33,7 @@ src/unilidar_driver/
 │   └── udp_receiver.hpp    POSIX UDP 收包
 ├── src/                    以上四个的实现 + unilidar_driver_node.cpp（ROS 薄节点）
 ├── examples/
-│   ├── decoder_selftest.cpp  离线自检，69 项断言
+│   ├── decoder_selftest.cpp  离线自检，91 项断言
 │   └── udp_probe.cpp         实测定界探针
 ├── launch/unilidar_driver.launch.py
 └── config/unilidar_params.yaml
@@ -122,6 +122,19 @@ clang++ -std=c++17 -Wall -Wextra -Wpedantic -O1 -I src/unilidar_driver/include \
 主机 6201。默认参数是「监听所有网卡 + 不过滤来源」，先这样确认能收到，
 再填 `local_ip` 与 `source_ip` 收紧。
 
+**UDP 接收缓冲。** 参数 `recv_buf_bytes`（默认 8 MiB，0 表示用系统默认）
+控制 `SO_RCVBUF`。雷达约 180 KB/s，而内核默认 rmem 只有约 200 KB，调度抖动
+时容易溢出丢包。内核会把请求值翻倍并受 `net.core.rmem_max` 裁剪，所以
+**诊断日志打印的是 `getsockopt` 读回的实际生效值**。若 `序号缺口` 持续增长，
+先把该值调到 16 MiB / 32 MiB 再观察。
+
+**序号异常怎么读。** 诊断日志按报文类型分别统计：`序号缺口` 表示向前跳变
+（中间可能丢了包），`重复包` 表示与上一条序号相同、整包已被丢弃（不会重复
+计入点云），`乱序` 表示序号倒退、包仍交付但顺序不可信。三者互不重叠。
+注意所有参数都做了范围校验：`local_port`、`cloud_scan_num`、`poll_period_ms`、
+`range_min < range_max`、`quaternion_order`、`recv_buf_bytes` 非法时节点会
+`FATAL` 打印原因并以非 0 退出，不会静默回退到一个「看起来能跑」的值。
+
 ## 相对官方节点的修正
 
 **QoS 不兼容。** 官方节点用 `create_publisher(..., 10)`，即 RELIABLE；
@@ -129,7 +142,8 @@ clang++ -std=c++17 -Wall -Wextra -Wpedantic -O1 -I src/unilidar_driver/include \
 RELIABLE 与 BEST_EFFORT 不兼容，表现为「官方节点明明在发，v3 一个字节都收不到」。
 本驱动统一按 `SensorDataQoS` 发布，与仓库内两个消费方对齐。
 
-另外：点云每 `cloud_scan_num` 条扫描线合成一帧发布（默认 18，约 10 Hz），
+另外：重复 UDP 包在校验通过后被直接丢弃（同一扫描线不会被计两次），
+丢包、重复、乱序分开计数；点云每 `cloud_scan_num` 条扫描线合成一帧发布（默认 18，约 10 Hz），
 与 v2 预瞄节点的输入节奏匹配；PointCloud2 字段为
 `x, y, z, intensity`，`intensity` 是 L1 相对普通 3D 雷达的增量（灰度维）。
 
@@ -140,10 +154,11 @@ RELIABLE 与 BEST_EFFORT 不兼容，表现为「官方节点明明在发，v3 �
 | 项目 | 状态 |
 |---|---|
 | CRC32 算法 | 已对标准测试向量 `123456789` 校验（0xCBF43926） |
-| 报文定界、重同步、CRC 篡改、帧尾篡改、长度越界 | 离线自检 69 项断言全过 |
+| 报文定界、重同步、CRC 篡改、帧尾篡改、长度越界、重复/乱序序号 | 离线自检 91 项断言全过 |
 | 点云几何换算 | 在退化标定下与解析解逐点比对（仰角 30° 时 z 应为 0.5） |
 | 测试自身有效性 | 变异测试：3 处人为破坏全部被对应断言抓住 |
 | `udp_receiver` + 解析器 + 探针 | 真实 UDP 回环：7 包收到、6 帧解出、1 帧 CRC 损坏被拒 |
 | 解析核心编译 | `-Wall -Wextra -Wpedantic` 零警告 |
-| **ROS 节点编译运行** | **未验证**，需在装 ROS 的目标机 `colcon build` |
+| ROS 节点编译 | 本仓库 CI 的 `ros` job 在 `ros:humble-ros-base` 容器里 `rosdep install` + `colcon build`，并用越界参数验证节点会 FATAL 退出（本地无 ROS，首次运行结果待 CI） |
+| **ROS 节点实机运行** | **未验证**，需接雷达后按上面的流程核对 |
 | **接真实雷达** | **未验证**，需按上面的探针流程核对 |

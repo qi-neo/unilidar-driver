@@ -25,7 +25,8 @@ ROS2 驱动：收 UDP 报文、解成标准 `PointCloud2` 与 `Imu` 话题。
 - 协议解析核心**不依赖 ROS**，可在任意有 clang 的机器上编译并跑断言
 - 报文定界只用「帧尾标识 + CRC32」，不硬编码整包长度
 - 配套 `udp_probe` 实测定界探针，5 分钟确认真实包长与 CRC
-- 69 项断言的离线自检，做过变异测试
+- 91 项断言的离线自检，做过变异测试
+- 按报文类型分别跟踪序号：重复包直接丢弃并计数，乱序与丢包分开统计
 - QoS 与常见下游对齐（`SensorDataQoS`），避免"明明在发却收不到"
 
 ## 快速开始
@@ -35,6 +36,7 @@ ROS2 驱动：收 UDP 报文、解成标准 `PointCloud2` 与 `Imu` 话题。
 cd ~/ws/src
 git clone https://github.com/qi-neo/unilidar-driver
 cd ~/ws
+rosdep install --from-paths src --ignore-src -r -y   # 按 package.xml 装齐依赖
 colcon build --packages-select unilidar_driver
 source install/setup.bash
 
@@ -97,12 +99,19 @@ clang++ -std=c++17 -Wall -Wextra -Wpedantic -O1 -I src/unilidar_driver/include \
 端口雷达 6101、主机 6201。默认参数是"监听所有网卡 + 不过滤来源"，
 先这样确认能收到，再填 `local_ip` 与 `source_ip` 收紧。
 
+另外注意 UDP 接收缓冲：默认请求 8 MiB（`recv_buf_bytes`，内置常量
+`kDefaultRecvBufBytes`）。Linux 内核会把请求值翻倍并受 `net.core.rmem_max`
+裁剪，**诊断日志打印的是 `getsockopt` 读回的实际生效值**，不看请求值。
+若诊断里的 `序号缺口` 持续增长，先把 `recv_buf_bytes` 调到 16 MiB / 32 MiB
+再观察；`duplicates` 持续增长则说明链路上有重复包（回环、镜像口或重传），
+驱动会直接丢弃重复包，不会重复计入点云。
+
 ## 仓库结构
 
 ```
 unilidar-driver/
 ├── .github/workflows/
-│   └── ci.yml                    CI：双编译器 × sanitizer + UDP 回环
+│   └── ci.yml                    CI：双编译器 × sanitizer + UDP 回环 + ROS 编译
 ├── docs/
 │   └── driver-design.md          《如何编写一个激光雷达驱动》思路文档
 ├── tests/
@@ -112,7 +121,7 @@ unilidar-driver/
 │   ├── include/unilidar_driver/     协议、解析、解码、收包（不依赖 ROS）
 │   ├── src/                       实现 + unilidar_driver_node.cpp（ROS 薄节点）
 │   ├── examples/
-│   │   ├── decoder_selftest.cpp   69 项断言的离线自检
+│   │   ├── decoder_selftest.cpp   91 项断言的离线自检
 │   │   └── udp_probe.cpp          实测定界探针
 │   ├── launch/ config/
 │   └── README.md                 包的详细说明
@@ -127,17 +136,18 @@ unilidar-driver/
 
 [![CI](https://github.com/qi-neo/unilidar-driver/actions/workflows/ci.yml/badge.svg)](https://github.com/qi-neo/unilidar-driver/actions/workflows/ci.yml)
 
-`.github/workflows/ci.yml`，三个 job：
+`.github/workflows/ci.yml`，四个 job：
 
 | Job | 内容 |
 |---|---|
 | `deps` | 依赖声明一致性：核对 `CMakeLists.txt` 的 `find_package` 与 `package.xml` 的依赖声明，漏声明即失败。见 `tools/check_deps.py` |
-| `core` | clang++ 与 g++ 两种编译器 × 普通 / ASan+UBSan 两种构建，共 4 个组合。`-Werror` 强制零警告，跑 69 项自检，另编译探针确认可用 |
-| `udp-loopback` | 真实 UDP 回环集成测试，再叠 ASan/UBSan 跑一遍 |
+| `core` | clang++ 与 g++ 两种编译器 × 普通 / ASan+UBSan 两种构建，共 4 个组合。`-Werror` 强制零警告，跑 91 项自检，另编译探针确认可用 |
+| `udp-loopback` | 真实 UDP 回环集成测试，再叠 ASan/UBSan 跑一遍；并验证探针在收不到包时返回非 0 |
+| `ros` | 在官方 `ros:humble-ros-base` 容器里 `rosdep install --from-paths src --ignore-src -r -y` 后 `colcon build --packages-select unilidar_driver`，并确认节点/自检/探针产物可执行；再用越界 `local_port` 启动节点，确认参数校验会 FATAL 并以非 0 退出 |
 
-**CI 不需要 ROS。** 解析核心源码层面不出现 ROS 头文件，所以一条 `clang++` 命令加一次执行就能覆盖协议、解析、解码三层，不需要 ROS 容器。
+前三个 job 不需要 ROS：解析核心源码层面不出现 ROS 头文件，一条 `clang++` 命令加一次执行就能覆盖协议、解析、解码三层。`ros` job 专门补上「ROS 节点从未被编译验证」这块缺口——之前只有外部仓库的 CI 顺带编译过同一份代码，本仓库自己是不编译节点的。
 
-回环测试是 `udp_receiver.cpp` 唯一的自动化覆盖：69 项自检直接喂字节给解析器，不经过 socket，而缓冲、超时、来源地址只有真收发才能验证。测试资产在 `tests/`：
+回环测试是 `udp_receiver.cpp` 唯一的自动化覆盖：91 项自检直接喂字节给解析器，不经过 socket，而缓冲、超时、来源地址只有真收发才能验证。测试资产在 `tests/`：
 
 ```bash
 bash tests/udp_loopback_test.sh                                    # 普通构建
@@ -145,8 +155,8 @@ EXTRA_CXXFLAGS="-fsanitize=address,undefined -g" \
   bash tests/udp_loopback_test.sh                                  # 叠加 sanitizer
 ```
 
-**CI 未覆盖**：ROS 节点的编译与运行。那需要 ROS 环境，代价远高于核心库，
-留待后续在有 ROS 的 runner 上补。
+**CI 仍未覆盖**：ROS 节点接真实雷达的实机运行（需要硬件与网络配置），
+以及四元数顺序、CRC 规则这类只能对着真机确认的项。
 
 ## 已验证 / 未验证
 
@@ -155,14 +165,14 @@ EXTRA_CXXFLAGS="-fsanitize=address,undefined -g" \
 | 项目 | 状态 |
 |---|---|
 | CRC32 算法 | 已对标准测试向量 `123456789` 校验（0xCBF43926） |
-| 报文定界、重同步、CRC 篡改、帧尾篡改、长度越界 | 离线自检 69 项断言全过 |
+| 报文定界、重同步、CRC 篡改、帧尾篡改、长度越界、重复/乱序序号 | 离线自检 91 项断言全过 |
 | CRC32 覆盖范围 | 按**官方实现**核对：反汇编 `libunilidar_sdk2.a` 的 `LidarPacketParser::parseByte`，区间为 `[frame+12, frame+packet_size-12)`；并加了"CRC 含帧头必须被拒"的回归断言。官方协议头注释与实现不一致，**真机仍待确认** |
 | 点云几何换算 | 退化标定下与解析解逐点比对（仰角 30° 时 z 应为 0.5） |
 | 自检自身有效性 | 变异测试：3 处人为破坏全部被对应断言抓住 |
 | `udp_receiver` + 解析器 + 探针 | 真实 UDP 回环：7 包收到、6 帧解出、1 帧 CRC 损坏被拒 |
 | 解析核心编译 | `-Wall -Wextra -Wpedantic -Werror` 零警告，clang 与 g++ 均过 |
 | 内存与未定义行为 | ASan + UBSan 下自检与回环测试均无报告 |
-| ROS 节点编译 | 已在 ROS Humble 干净环境下 `colcon build` 通过（由 [悬架仓 CI](https://github.com/qi-neo/active-suspension-lidar-preview/actions) 编译同一份代码，见其 `unilidar_driver` 包；本仓库 CI 不含 ROS 环节） |
+| ROS 节点编译 | 本仓库 CI 新增的 `ros` job 在 `ros:humble-ros-base` 容器里 `rosdep install` + `colcon build`（此前由 [悬架仓 CI](https://github.com/qi-neo/active-suspension-lidar-preview/actions) 顺带编译同一份代码；本仓库这一 job 为新增，首次运行结果待 CI 确认） |
 | CMakeLists 与 package.xml 依赖一致 | CI 每次运行核对，漏声明即失败 |
 | **ROS 节点实机运行** | **未验证**，需接雷达后按探针流程核对 |
 | **接真实雷达** | **未验证**，需按探针流程核对 |
@@ -181,7 +191,7 @@ EXTRA_CXXFLAGS="-fsanitize=address,undefined -g" \
 | `frame_decoder.cpp` | `unitree_lidar_utilities.h` 的 `parseFromPacketToPointCloud` | 测距值换算、角度迭代、无效点与距离门限判定、双棱镜机构到 XYZ 的投影公式 |
 
 除此之外全部是自研实现：socket 封装、帧定界与重同步、三道越界保护、统计诊断、
-ROS 适配层、69 项自检、`udp_probe` 探针、回环测试、方法论文档。
+ROS 适配层、91 项自检、`udp_probe` 探针、回环测试、方法论文档。
 其中 CRC32 是标准 CRC-32/ISO-HDLC，属公开标准算法，不专属任何厂商。
 
 两个派生文件的头部均已按 BSD-3-Clause 第 1 条**保留原始版权声明**，并逐项列出
