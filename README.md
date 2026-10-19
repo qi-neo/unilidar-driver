@@ -25,7 +25,7 @@ ROS2 驱动：收 UDP 报文、解成标准 `PointCloud2` 与 `Imu` 话题。
 - 协议解析核心**不依赖 ROS**，可在任意有 clang 的机器上编译并跑断言
 - 报文定界只用「帧尾标识 + CRC32」，不硬编码整包长度
 - 配套 `udp_probe` 实测定界探针，5 分钟确认真实包长与 CRC
-- 63 项断言的离线自检，做过变异测试
+- 69 项断言的离线自检，做过变异测试
 - QoS 与常见下游对齐（`SensorDataQoS`），避免"明明在发却收不到"
 
 ## 快速开始
@@ -76,15 +76,24 @@ clang++ -std=c++17 -Wall -Wextra -Wpedantic -O1 -I src/unilidar_driver/include \
 长度只用来做诊断提示。接上雷达先用 `udp_probe` 核对实际情况，
 若真实长度不是 1044，把探针结果反馈回来核对固件版本即可。
 
-## 两处需要实机确认
+## 三处需要实机确认
 
 **1. IMU 四元数分量顺序。** 固件没有公开文档约定 `quaternion[4]` 的排列，
 而官方 ROS2 包自身就是矛盾的：它的 Imu 消息按 `x,y,z,w` 填，TF 广播却按
 `w,x,y,z` 填。填错会让姿态整体错乱。本驱动做成参数 `quaternion_order`
-（`wxyz` 或 `xyzw`）。判定方法：把雷达静止水平放置，正确的顺序下
-`w` 应接近 ±1，其余三个分量接近 0。
+（默认 `xyzw`，与官方 Imu 话题一致）。判定方法：把雷达静止水平放置，正确的
+顺序下 `w` 应接近 ±1，其余三个分量接近 0。
 
-**2. 网络地址。** 宇树 L1 出厂通常配为 `192.168.1.62`，主机侧 `192.168.1.2`，
+**2. CRC32 的覆盖范围。** 本实现按**官方实现**（而不是官方注释）取"只覆盖数据段"，
+即 `[12, packet_size-12)`：从官方 `libunilidar_sdk2.a` 反汇编
+`LidarPacketParser::parseByte`，CRC 循环起点是 `frame+12`、终点是
+`frame+packet_size-12`；而官方协议头文件里
+`uint32_t crc32; // crc check of head and data` 这句注释与实现相矛盾。
+接上真机后第一件要看的指标就是诊断日志里的 `CRC` 计数：**若它持续在涨而
+帧尾错误很少，说明该固件的 CRC 规则与官方实现不同**，把 `udp_probe --hex`
+的原始包发回来即可定位。
+
+**3. 网络地址。** 宇树 L1 出厂通常配为 `192.168.1.62`，主机侧 `192.168.1.2`，
 端口雷达 6101、主机 6201。默认参数是"监听所有网卡 + 不过滤来源"，
 先这样确认能收到，再填 `local_ip` 与 `source_ip` 收紧。
 
@@ -103,7 +112,7 @@ unilidar-driver/
 │   ├── include/unilidar_driver/     协议、解析、解码、收包（不依赖 ROS）
 │   ├── src/                       实现 + unilidar_driver_node.cpp（ROS 薄节点）
 │   ├── examples/
-│   │   ├── decoder_selftest.cpp   63 项断言的离线自检
+│   │   ├── decoder_selftest.cpp   69 项断言的离线自检
 │   │   └── udp_probe.cpp          实测定界探针
 │   ├── launch/ config/
 │   └── README.md                 包的详细说明
@@ -123,12 +132,12 @@ unilidar-driver/
 | Job | 内容 |
 |---|---|
 | `deps` | 依赖声明一致性：核对 `CMakeLists.txt` 的 `find_package` 与 `package.xml` 的依赖声明，漏声明即失败。见 `tools/check_deps.py` |
-| `core` | clang++ 与 g++ 两种编译器 × 普通 / ASan+UBSan 两种构建，共 4 个组合。`-Werror` 强制零警告，跑 63 项自检，另编译探针确认可用 |
+| `core` | clang++ 与 g++ 两种编译器 × 普通 / ASan+UBSan 两种构建，共 4 个组合。`-Werror` 强制零警告，跑 69 项自检，另编译探针确认可用 |
 | `udp-loopback` | 真实 UDP 回环集成测试，再叠 ASan/UBSan 跑一遍 |
 
 **CI 不需要 ROS。** 解析核心源码层面不出现 ROS 头文件，所以一条 `clang++` 命令加一次执行就能覆盖协议、解析、解码三层，不需要 ROS 容器。
 
-回环测试是 `udp_receiver.cpp` 唯一的自动化覆盖：63 项自检直接喂字节给解析器，不经过 socket，而缓冲、超时、来源地址只有真收发才能验证。测试资产在 `tests/`：
+回环测试是 `udp_receiver.cpp` 唯一的自动化覆盖：69 项自检直接喂字节给解析器，不经过 socket，而缓冲、超时、来源地址只有真收发才能验证。测试资产在 `tests/`：
 
 ```bash
 bash tests/udp_loopback_test.sh                                    # 普通构建
@@ -146,7 +155,8 @@ EXTRA_CXXFLAGS="-fsanitize=address,undefined -g" \
 | 项目 | 状态 |
 |---|---|
 | CRC32 算法 | 已对标准测试向量 `123456789` 校验（0xCBF43926） |
-| 报文定界、重同步、CRC 篡改、帧尾篡改、长度越界 | 离线自检 63 项断言全过 |
+| 报文定界、重同步、CRC 篡改、帧尾篡改、长度越界 | 离线自检 69 项断言全过 |
+| CRC32 覆盖范围 | 按**官方实现**核对：反汇编 `libunilidar_sdk2.a` 的 `LidarPacketParser::parseByte`，区间为 `[frame+12, frame+packet_size-12)`；并加了"CRC 含帧头必须被拒"的回归断言。官方协议头注释与实现不一致，**真机仍待确认** |
 | 点云几何换算 | 退化标定下与解析解逐点比对（仰角 30° 时 z 应为 0.5） |
 | 自检自身有效性 | 变异测试：3 处人为破坏全部被对应断言抓住 |
 | `udp_receiver` + 解析器 + 探针 | 真实 UDP 回环：7 包收到、6 帧解出、1 帧 CRC 损坏被拒 |
@@ -171,7 +181,7 @@ EXTRA_CXXFLAGS="-fsanitize=address,undefined -g" \
 | `frame_decoder.cpp` | `unitree_lidar_utilities.h` 的 `parseFromPacketToPointCloud` | 测距值换算、角度迭代、无效点与距离门限判定、双棱镜机构到 XYZ 的投影公式 |
 
 除此之外全部是自研实现：socket 封装、帧定界与重同步、三道越界保护、统计诊断、
-ROS 适配层、63 项自检、`udp_probe` 探针、回环测试、方法论文档。
+ROS 适配层、69 项自检、`udp_probe` 探针、回环测试、方法论文档。
 其中 CRC32 是标准 CRC-32/ISO-HDLC，属公开标准算法，不专属任何厂商。
 
 两个派生文件的头部均已按 BSD-3-Clause 第 1 条**保留原始版权声明**，并逐项列出
