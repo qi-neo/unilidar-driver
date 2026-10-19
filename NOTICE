@@ -21,10 +21,15 @@ Copyright (c) 2026 qi-neo
   src/unilidar_driver/src/frame_decoder.cpp
 
       点云解码逻辑：测距值换算、水平角与垂直角的迭代方式、无效点与距离门限
-      的判定、以及由双棱镜扫描机构几何关系推出 XYZ 坐标的那一组公式。
+      的判定、由双棱镜扫描机构几何关系推出 XYZ 坐标的那一组公式，以及逐点
+      时间偏移（第 j 个点 = j × time_increment，含被剔除点也累加）的语义。
       派生自 unitree_lidar_sdk2 的
       unitree_lidar_sdk/include/unitree_lidar_utilities.h
       中的函数 parseFromPacketToPointCloud
+
+  说明：ring 的"1 基、一条扫描线一个环"约定同样核对自上述官方实现与官方
+  README 的示例输出；官方单包内把 ring 写死为 1，本驱动改为由调用方按拼帧
+  顺序传入真实线号，属于本项目的实现选择，不是从官方复制的代码。
 
 两个文件的头部均已按 BSD-3-Clause 第 1 条保留原始版权声明，并逐项列出了
 相对原始实现的改动，改动处可自行比对。

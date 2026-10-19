@@ -6,7 +6,8 @@
 ## [未发布]
 
 对应 1.1.x。主线是"把协议里照注释抄来的假设换成对着官方实现核对过的结论"，
-并把收包路径的健壮性补齐：缓冲可配、序号异常可分辨、参数非法直接失败。
+并把收包路径的健壮性补齐：缓冲可配、序号异常可分辨、参数非法直接失败；
+再补上逐点 `time` / `ring`，为下游运动去畸变打基础。
 
 ### 修复
 
@@ -34,8 +35,8 @@
   `range_min >= range_max`、端口越界也照常启动。配置与实际行为不符，排障时
   极难发现。现在统一 `RCLCPP_FATAL` + 抛异常，`main` 捕获后以非 0 退出，
   覆盖 `local_port`(1..65535)、`quaternion_order`(wxyz/xyzw)、
-  `cloud_scan_num`(>=1)、`poll_period_ms`(>=1)、`range_min < range_max`、
-  `recv_buf_bytes`(>=0)。
+  `cloud_scan_num`(1..65535，点云 ring 字段为 UINT16)、`poll_period_ms`(>=1)、
+  `range_min < range_max`、`recv_buf_bytes`(>=0)。
 
 ### 新增
 
@@ -63,6 +64,24 @@
   乱序包仍交付、`seq_gaps`/`duplicates`/`out_of_order` 三者互不重叠、
   点云与 IMU 按类型分别跟踪序号、uint32 序号回绕
   （`0xFFFFFFFF -> 0`）不被误判为丢包或乱序。
+- **逐点时间与环号（运动去畸变的前置）。** 核心库新增 `PointXYZIT`
+  （x/y/z/intensity/time/ring）与带 `ring` 参数的 `decodePointCloud` 重载，
+  旧签名（只出 xyz + intensity）保持不变，旧调用路径与统计语义不动。
+  语义逐条对着官方 `unitree_lidar_utilities.h` 的 `parseFromPacketToPointCloud`
+  核对：第 j 个点的相对偏移 = `j × time_increment`（`time_relative` 在点循环里
+  每点累加一次，被剔除的无效点也占一步）；帧时间戳沿用原有两种模式；
+  `ring` 保留官方"1 基、一条扫描线一个环"的约定，由节点按拼帧顺序写入
+  （官方 SDK 2.0.2 实际发布二进制里每点 `ring` 写死为 1，只有累加器的
+  `ringNum` 计数——本驱动补上了真实线号，拼帧后 `ring ∈ [1, cloud_scan_num]`）。
+  ROS 节点 PointCloud2 增加 `time`(FLOAT32，偏移 16) 与 `ring`(UINT16，偏移 20)，
+  `point_step` 由 16 调整为 24，偏移 22 起 2 字节 padding 用于保持 4 字节对齐；
+  节点诊断新增"逐点时间步长异常"计数与一次性告警。
+- **离线自检 91 → 135 项。** 新增 44 项断言：逐点时间严格单调且相邻差等于
+  `time_increment`（含 `time_increment = scan_period/point_num` 的对齐情形）、
+  被剔除的无效点不压缩时间轴、系统/硬件两种帧时间戳模式下 `time` 基准正确、
+  `ring` 显式传入与默认 1（与官方单包逐点值一致）、拼满 18 条扫描线后同一线内
+  点序号的 `ring` 分布为 1..18、多线拼接后时间不倒退、
+  `time_increment` 为 0/NaN 时退化并计数、新旧接口解出的 xyz/intensity 逐点一致。
 - **回环测试补充两项检查。** 探针在收不到任何 UDP 数据时必须返回非 0
   （用一个没人发包的端口跑 1 秒）；汇总里的"重复包/乱序包"必须为 0。
 
@@ -70,12 +89,20 @@
 
 - `UdpReceiver::open()` 签名增加 `recv_buf_bytes`，`udp_probe` 与节点同步更新；
   `udp_probe` 汇总新增"重复包/乱序包"两项。
-- `docs/driver-design.md` 的断言数量同步为 91。
-- CI `core` job 的自检数量、README / 包 README 的说明同步更新。
+- 点云发布路径改用带 time/ring 的解码重载：`PointCloud2` 字段 6 个、
+  `point_step = 24`，`cloud_scan_num` 校验补上 uint16 上限。
+- `docs/driver-design.md` 的断言数量、README / 包 README / CI 的说明同步为 135。
+- 包 README 的 `quaternion_order` 默认值说明同步为 `xyzw`（与节点、yaml 一致，
+  此前文档笔误写成 `wxyz`）。
 
 ### 验证
 
-- `decoder_selftest` 91/91 通过（clang++，`-Wall -Wextra -Wpedantic -Werror`）。
+- `decoder_selftest` 135/135 通过（clang++ 与 g++，`-Wall -Wextra -Wpedantic -Werror`）。
+- 逐点 time/ring 语义对照官方源码核对：`parseFromPacketToPointCloud` 里
+  `time_relative` 每点累加、`point3d.ring = 1`；官方 README 示例
+  `cloud size = 5205, ringNum = 18 ... ring = 1`；并反汇编
+  `UnitreeLidarReaderImp::runParse` / `appendOnePointCloud` 确认官方单包内
+  ring 写死为 1、真实线序只在累加器的 `ringNum` 计数里。
 - 真实 UDP 回环 PASSED：7 包收到、6 帧解出、1 帧 CRC 损坏被拒、
   重复包/乱序包均为 0；探针在无数据时返回非 0。
 - `python3 tools/check_deps.py` 通过（1 个包依赖声明一致）。
@@ -83,12 +110,18 @@
 - 变异检验：把解析器换回旧实现后，CRC 批次新增断言从 69/69 变成 36 项失败，
   证明新增断言确实能抓住该 bug。
 - **未在本地执行**：ROS 节点的 `colcon build` 与参数校验冒烟（本机无 ROS），
-  已写进 CI 的 `ros` job，待首次 CI 运行确认。
+  已写进 CI 的 `ros` job，待首次 CI 运行确认；`PointCloud2` 的 time/ring
+  字段发布路径只做了字节级手算，并用最小 ROS 桩头文件做了语法/模板实例化检查
+  （clang 与 g++ 均通过），未在真实 ROS 环境编译/运行过。
 
 ### 仍待实机确认
 
 - CRC 规则（若某固件确实把帧头算进去，诊断日志会显示 `bad_crc` 持续增长）。
 - 四元数顺序（静止水平时 `|w|≈1` 的那个分量即 w）。
+- **逐点 time/ring**：`time_increment` 与 `scan_period` 的真实取值、`ring`
+  的线序是否与拼帧顺序一致、系统时间戳模式下跨线时间抖动，都要接真机用
+  rosbag 或 `ros2 topic echo` 核对；若固件 `time_increment` 为 0，诊断日志会
+  打印"逐点时间步长异常"。
 - 型号/协议对应关系：本实现的 `55 AA 05 0A` + 300 点/片来自官方
   `unilidar_sdk2`，而该 SDK 官方说明是 **L2** 的 SDK；项目名与文档目前写 L1。
   接真机第一件事应是用 `udp_probe --hex` 核对帧头与包长，再统一命名。
