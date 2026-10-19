@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -633,6 +634,331 @@ static void test_buffer_guard() {
   check(p.buffered() <= 1024, "清空后缓冲不应继续增长");
 }
 
+// ---------------------------------------------------------------------------
+// 9. 逐点时间 time 与环号 ring
+//
+// 官方约定（逐字核对 unitree_lidar_sdk2 的
+// unitree_lidar_sdk/include/unitree_lidar_utilities.h 里
+// parseFromPacketToPointCloud）：
+//   - 第 j 个点相对帧起始的时间偏移 = j * time_increment，从 0 起算；
+//     time_relative 在 for 的递增表达式里每处理一个点加一次，因此**被剔除的
+//     无效点也占一步**，时间轴不会被压缩；
+//   - 单包内所有点 ring 恒为 1：一个点云报文就是一条扫描线，整圈由
+//     cloud_scan_num（默认 18）条扫描线拼成。官方 README 示例输出
+//     "cloud size = 5205, ringNum = 18 ... ring = 1" 即第一条线的点 ring 从 1
+//     起算（1 基），拼帧后 ringNum 等于已拼入的线数；
+//   - 帧时间戳：系统时间戳模式 = 本机此刻 - scan_period，硬件模式 = 报文 stamp。
+// 本驱动的 time 输出绝对秒（帧时间戳 + 偏移），ring 由调用方按拼帧顺序给。
+// ---------------------------------------------------------------------------
+static void test_point_time_and_ring() {
+  std::printf("[9] 逐点时间与环号\n");
+
+  // 生成一条扫描线：所有点距离有效，时间步长与扫描周期可控。
+  auto make_line = [](uint32_t seq, uint32_t point_num, float time_increment, float scan_period,
+                      uint32_t sec, uint32_t nsec) {
+    LidarPointData body = makePointBody(seq, point_num, sec, nsec);
+    body.scan_period = scan_period;
+    body.time_increment = time_increment;
+    return seal<LidarPointDataPacket>(kTypePointCloud3D, &body, sizeof(body));
+  };
+
+  // 9.1 单调递增、相邻差等于 time_increment
+  {
+    const uint32_t n = 300;
+    const float inc = 0.00001f;  // 10 µs
+    // 本例特意让 time_increment = scan_period / point_num，两种说法一致
+    const float period = inc * static_cast<float>(n);
+    const auto frame = make_line(0, n, inc, period, 0, 0);
+
+    DecodeParams params;
+    params.use_system_timestamp = false;  // 硬件 stamp = 0，便于手算绝对时间
+    DecodeStats st;
+    std::vector<PointXYZIT> pts;
+    double stamp = -1.0;
+    check(decodePointCloud(frame, params, 0.0, pts, stamp, st, 1), "逐点时间：应解码成功");
+    check(pts.size() == n, "逐点时间：有效点数应为 300");
+    if (pts.size() == n) {
+      check(std::fabs(stamp) < 1e-9, "逐点时间：硬件时间戳模式基准应取报文 stamp");
+      check(std::fabs(pts[0].time) < 1e-9, "逐点时间：第 0 个点的偏移应为 0");
+      check(std::fabs(pts[150].time - 150 * inc) < 1e-7,
+            "逐点时间：第 150 个点的偏移应为 150*time_increment");
+      check(std::fabs(pts[299].time - 299 * inc) < 1e-7,
+            "逐点时间：末点的偏移应为 299*time_increment");
+      check(std::fabs((pts[1].time - pts[0].time) - inc) < 1e-8,
+            "逐点时间：相邻差应为 time_increment（本例 = scan_period/point_num）");
+      bool monotonic = true;
+      for (std::size_t i = 1; i < pts.size(); ++i) {
+        if (!(pts[i].time > pts[i - 1].time)) {
+          monotonic = false;
+          break;
+        }
+      }
+      check(monotonic, "逐点时间：应严格单调递增");
+    }
+  }
+
+  // 9.2 被剔除的无效点仍占一个时间步（官方按 j 推进，不压缩时间轴）
+  {
+    const uint32_t n = 10;
+    const float inc = 0.001f;
+    LidarPointData body = makePointBody(0, n, 0, 0);
+    body.scan_period = inc * static_cast<float>(n);
+    body.time_increment = inc;
+    body.ranges[2] = 0;
+    body.ranges[3] = 0;
+    const auto frame = seal<LidarPointDataPacket>(kTypePointCloud3D, &body, sizeof(body));
+
+    DecodeParams params;
+    params.use_system_timestamp = false;
+    DecodeStats st;
+    std::vector<PointXYZIT> pts;
+    double stamp = -1.0;
+    check(decodePointCloud(frame, params, 0.0, pts, stamp, st, 1),
+          "逐点时间：含无效点的帧应解码成功");
+    check(pts.size() == 8, "逐点时间：2 个无效点应被剔除");
+    if (pts.size() == 8) {
+      check(std::fabs(pts[2].time - 4 * inc) < 1e-7,
+            "逐点时间：剔除点后第 3 个有效点仍应是第 4 步（时间轴不压缩）");
+      check(std::fabs((pts[2].time - pts[1].time) - 3 * inc) < 1e-7,
+            "逐点时间：跨过 2 个被剔除点（隔 3 步）时差应为 3*time_increment");
+    }
+    check(st.dropped_zero_range == 2, "逐点时间：应记录 2 次无效距离");
+  }
+
+  // 9.3 两种帧时间戳模式下 time 的基准都正确
+  {
+    LidarPointData body = makePointBody(0, 10, 1000, 500000000);  // 硬件 stamp = 1000.5
+    body.scan_period = 0.1f;
+    body.time_increment = 0.002f;
+    const auto frame = seal<LidarPointDataPacket>(kTypePointCloud3D, &body, sizeof(body));
+
+    // 系统时间戳模式：帧起始 = now - scan_period
+    {
+      DecodeParams params;  // 默认 use_system_timestamp = true
+      DecodeStats st;
+      std::vector<PointXYZIT> pts;
+      double stamp = -1.0;
+      check(decodePointCloud(frame, params, 50.0, pts, stamp, st, 1),
+            "时间基准：系统时间戳模式应解码成功");
+      check(std::fabs(stamp - 49.9) < 1e-5, "时间基准：系统时间戳应回退一个扫描周期");
+      if (pts.size() == 10) {
+        check(std::fabs(pts[0].time - 49.9) < 1e-5, "时间基准：系统模式第 0 个点绝对时间应为帧起始");
+        check(std::fabs(pts[9].time - (49.9 + 0.018)) < 1e-5,
+              "时间基准：系统模式末点绝对时间应为帧起始 + 9*time_increment");
+      }
+    }
+
+    // 硬件时间戳模式：帧起始 = 报文里的雷达时间戳
+    {
+      DecodeParams params;
+      params.use_system_timestamp = false;
+      DecodeStats st;
+      std::vector<PointXYZIT> pts;
+      double stamp = -1.0;
+      check(decodePointCloud(frame, params, 0.0, pts, stamp, st, 1),
+            "时间基准：硬件时间戳模式应解码成功");
+      check(std::fabs(stamp - 1000.5) < 1e-3, "时间基准：硬件时间戳应取报文 stamp");
+      if (pts.size() == 10) {
+        check(std::fabs(pts[0].time - 1000.5) < 1e-3,
+              "时间基准：硬件模式第 0 个点绝对时间应为帧起始");
+        check(std::fabs((pts[9].time - pts[0].time) - 0.018) < 1e-3,
+              "时间基准：硬件模式相邻点间隔仍应为 time_increment");
+      }
+    }
+  }
+
+  // 9.4 ring：显式传入、默认值、拼满一圈后的分布
+  {
+    const uint32_t n = 10;
+    const auto frame = make_line(0, n, 0.001f, 0.01f, 0, 0);
+    DecodeParams params;
+    params.use_system_timestamp = false;
+    DecodeStats st;
+    std::vector<PointXYZIT> pts;
+    double stamp = 0.0;
+
+    check(decodePointCloud(frame, params, 0.0, pts, stamp, st, 7), "ring：显式传入 7 应解码成功");
+    bool all_seven = !pts.empty();
+    for (const PointXYZIT& p : pts) {
+      if (p.ring != 7) all_seven = false;
+    }
+    check(all_seven, "ring：一条扫描线内所有点的 ring 都应为传入值");
+
+    // 不传 ring 时的默认值应与官方单包逐点值一致（官方写死为 1）
+    std::vector<PointXYZIT> pts_default;
+    check(decodePointCloud(frame, params, 0.0, pts_default, stamp, st),
+          "ring：不传 ring 也应解码成功");
+    bool all_one = !pts_default.empty();
+    for (const PointXYZIT& p : pts_default) {
+      if (p.ring != 1) all_one = false;
+    }
+    check(all_one, "ring：不传时默认 1（与官方单包逐点值一致）");
+
+    // 拼满一圈：每条线共享本线 ring；同一个线内点序号 m 在 18 条线上
+    // 依次得到 1..cloud_scan_num，这就是"整圈环号"的分布。
+    const int scan_num = 18;
+    std::vector<std::vector<PointXYZIT>> lines(static_cast<std::size_t>(scan_num));
+    for (int k = 0; k < scan_num; ++k) {
+      DecodeStats stk;
+      double stampk = 0.0;
+      decodePointCloud(frame, params, 0.0, lines[static_cast<std::size_t>(k)], stampk, stk,
+                       static_cast<std::uint16_t>(k + 1));
+    }
+    bool in_range = true;
+    for (const auto& line : lines) {
+      for (const PointXYZIT& p : line) {
+        if (p.ring < 1 || p.ring > scan_num) in_range = false;
+      }
+    }
+    check(in_range, "ring：拼帧后 ring 应落在 [1, cloud_scan_num]");
+    const std::size_t probes[3] = {0, 5, 9};
+    for (std::size_t m : probes) {
+      bool ok = true;
+      for (int k = 0; k < scan_num; ++k) {
+        if (m >= lines[static_cast<std::size_t>(k)].size() ||
+            lines[static_cast<std::size_t>(k)][m].ring != k + 1) {
+          ok = false;
+        }
+      }
+      check(ok, "ring：同一线内点序号 " + std::to_string(m) + " 在 18 条线上的 ring 应为 1..18");
+    }
+    bool seen[scan_num + 1] = {};
+    for (const auto& line : lines) {
+      for (const PointXYZIT& p : line) seen[p.ring] = true;
+    }
+    int unique_rings = 0;
+    for (int r = 1; r <= scan_num; ++r) {
+      if (seen[r]) ++unique_rings;
+    }
+    check(unique_rings == scan_num, "ring：整圈内应恰好出现 18 个不同环号");
+  }
+
+  // 9.5 多条扫描线拼成一圈后，逐点时间不倒退
+  {
+    const uint32_t n = 10;
+    const float inc = 0.001f;  // 线内跨 9 ms
+    const int scan_num = 18;
+
+    // 硬件时间戳模式：每条线 stamp 相隔 1 s
+    {
+      DecodeParams params;
+      params.use_system_timestamp = false;
+      std::vector<PointXYZIT> all;
+      bool ok = true;
+      for (int k = 0; k < scan_num; ++k) {
+        const auto frame = make_line(static_cast<uint32_t>(k), n, inc, 0.01f,
+                                     static_cast<uint32_t>(1000 + k), 0);
+        DecodeStats stk;
+        std::vector<PointXYZIT> line;
+        double stampk = 0.0;
+        if (!decodePointCloud(frame, params, 0.0, line, stampk, stk, static_cast<std::uint16_t>(k + 1))) {
+          ok = false;
+        }
+        all.insert(all.end(), line.begin(), line.end());
+      }
+      check(ok, "拼帧：18 条线都应解码成功");
+      bool ordered = !all.empty();
+      for (std::size_t i = 1; i < all.size(); ++i) {
+        if (!(all[i].time > all[i - 1].time)) ordered = false;
+      }
+      check(ordered, "拼帧：硬件时间戳模式下时间应严格递增");
+    }
+
+    // 系统时间戳模式：每条线的解码时刻相隔 20 ms（线内只占 9 ms）
+    {
+      DecodeParams params;  // 默认 use_system_timestamp = true
+      const float scan_period = 0.01f;
+      std::vector<PointXYZIT> all;
+      double cross_gap = 0.0;
+      for (int k = 0; k < scan_num; ++k) {
+        const auto frame = make_line(static_cast<uint32_t>(k), n, inc, scan_period, 0, 0);
+        DecodeStats stk;
+        std::vector<PointXYZIT> line;
+        double stampk = 0.0;
+        decodePointCloud(frame, params, 100.0 + 0.02 * k, line, stampk, stk,
+                         static_cast<std::uint16_t>(k + 1));
+        if (!all.empty() && !line.empty()) cross_gap = line.front().time - all.back().time;
+        all.insert(all.end(), line.begin(), line.end());
+      }
+      bool ordered = !all.empty();
+      for (std::size_t i = 1; i < all.size(); ++i) {
+        if (!(all[i].time > all[i - 1].time)) ordered = false;
+      }
+      check(ordered, "拼帧：系统时间戳模式下时间应严格递增");
+      check(std::fabs(cross_gap - 0.011) < 2e-4,
+            "拼帧：相邻两条线的时间间隔应为 20 ms - 9 ms = 11 ms");
+    }
+  }
+
+  // 9.6 time_increment 非法：退化为帧时间戳并计数（官方不校验该字段）
+  {
+    const uint32_t n = 5;
+    const auto make_bad = [&](float inc) {
+      LidarPointData body = makePointBody(0, n, 0, 0);
+      body.scan_period = 0.01f;
+      body.time_increment = inc;
+      return seal<LidarPointDataPacket>(kTypePointCloud3D, &body, sizeof(body));
+    };
+
+    DecodeParams params;
+    params.use_system_timestamp = false;
+    {
+      DecodeStats st;
+      std::vector<PointXYZIT> pts;
+      double stamp = 0.0;
+      check(decodePointCloud(make_bad(0.f), params, 0.0, pts, stamp, st, 1),
+            "时间步长异常：time_increment=0 仍应解码成功");
+      bool same = !pts.empty();
+      for (const PointXYZIT& p : pts) {
+        if (std::fabs(p.time) > 1e-9) same = false;
+      }
+      check(same, "时间步长异常：time_increment=0 时所有点应退化为帧时间戳");
+      check(st.time_increment_invalid == 1, "时间步长异常：应计入 time_increment_invalid");
+    }
+    {
+      DecodeStats st;
+      std::vector<PointXYZIT> pts;
+      double stamp = 0.0;
+      const auto nan_frame = make_bad(std::numeric_limits<float>::quiet_NaN());
+      check(decodePointCloud(nan_frame, params, 0.0, pts, stamp, st, 1),
+            "时间步长异常：time_increment=NaN 仍应解码成功");
+      bool finite = !pts.empty();
+      for (const PointXYZIT& p : pts) {
+        if (!std::isfinite(p.time)) finite = false;
+      }
+      check(finite, "时间步长异常：NaN 步长不应污染输出时间（应为有限值）");
+      check(st.time_increment_invalid == 1, "时间步长异常：NaN 也应计数");
+    }
+  }
+
+  // 9.7 旧接口回归：同一帧两种接口解出的 xyz/intensity 逐点一致
+  {
+    const auto frame = make_line(0, 6, 0.001f, 0.01f, 0, 0);
+    DecodeParams params;
+    params.use_system_timestamp = false;
+    DecodeStats st_old;
+    DecodeStats st_new;
+    std::vector<PointXYZI> old_pts;
+    std::vector<PointXYZIT> new_pts;
+    double stamp_old = 0.0;
+    double stamp_new = 0.0;
+    check(decodePointCloud(frame, params, 0.0, old_pts, stamp_old, st_old),
+          "旧接口兼容：旧签名应能解码同一帧");
+    check(decodePointCloud(frame, params, 0.0, new_pts, stamp_new, st_new, 3),
+          "旧接口兼容：新签名应能解码同一帧");
+    bool same = old_pts.size() == new_pts.size() && !old_pts.empty();
+    for (std::size_t i = 0; same && i < old_pts.size(); ++i) {
+      if (old_pts[i].x != new_pts[i].x || old_pts[i].y != new_pts[i].y ||
+          old_pts[i].z != new_pts[i].z || old_pts[i].intensity != new_pts[i].intensity) {
+        same = false;
+      }
+    }
+    check(same, "旧接口兼容：xyz/intensity 应与新接口逐点相同");
+    check(st_old.time_increment_invalid == 0 && st_old.points_out == st_new.points_out,
+          "旧接口兼容：旧路径不产生逐点时间统计");
+  }
+}
+
 int main() {
   std::printf("unilidar_driver 离线自检\n\n");
   test_crc_and_layout();
@@ -643,6 +969,7 @@ int main() {
   test_point_decoding();
   test_imu();
   test_buffer_guard();
+  test_point_time_and_ring();
 
   std::printf("\n检查项 %d，失败 %d -> %s\n", g_checks, g_failed,
               g_failed == 0 ? "全部通过" : "存在失败");
