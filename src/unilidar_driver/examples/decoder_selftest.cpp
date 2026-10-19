@@ -104,6 +104,17 @@ static std::vector<std::uint8_t> makeCloudFrame(uint32_t seq, uint32_t point_num
   return seal<LidarPointDataPacket>(kTypePointCloud3D, &body, sizeof(body));
 }
 
+static std::vector<std::uint8_t> makeImuFrame(uint32_t seq) {
+  LidarImuData body{};
+  body.info.seq = seq;
+  body.info.payload_size = sizeof(LidarImuData);
+  body.info.stamp.sec = 2000;
+  body.info.stamp.nsec = 0;
+  body.quaternion[0] = 1.f;
+  body.linear_acceleration[2] = 9.8f;
+  return seal<LidarImuDataPacket>(kTypeImu, &body, sizeof(body));
+}
+
 // ---------------------------------------------------------------------------
 // 1. CRC 与结构体尺寸
 // ---------------------------------------------------------------------------
@@ -319,10 +330,111 @@ static void test_sequence() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. 点云几何解码
+// 5. 重复包与乱序包
+//
+// 序号异常分三类，含义必须互不重叠：
+//   向前跳变（丢包）  -> seq_gaps
+//   与上一条相同（重复）-> duplicates，且整包丢弃、不交付
+//   倒退（乱序）      -> out_of_order，包仍交付
+// 且必须按 packet_type 分开跟踪：点云 102 与 IMU 104 是两条独立序号序列。
+// ---------------------------------------------------------------------------
+static void test_duplicates_and_order() {
+  std::printf("[5] 重复包丢弃与乱序统计\n");
+
+  // 同类型重复包只交付第一份
+  {
+    PacketParser p;
+    const auto f = makeCloudFrame(10, 5);
+    p.append(f.data(), f.size());
+    p.append(f.data(), f.size());
+
+    std::vector<uint8_t> out;
+    uint32_t type = 0;
+    check(p.pull(out, type) == PullStatus::kFrameReady, "重复包之前的首帧应解出");
+    check(p.stats().frames_ok == 1, "首帧交付后 frames_ok 应为 1");
+    check(p.pull(out, type) != PullStatus::kFrameReady, "重复包不应再交付");
+    check(p.stats().duplicates == 1, "重复包应计入 duplicates");
+    check(p.stats().frames_ok == 1, "重复包不应增加 frames_ok");
+  }
+
+  // 重复包之后紧跟的新序号仍要正常交付，不能因丢包逻辑而错位
+  {
+    PacketParser p;
+    const auto f10 = makeCloudFrame(10, 5);
+    const auto f11 = makeCloudFrame(11, 5);
+    p.append(f10.data(), f10.size());
+    p.append(f10.data(), f10.size());
+    p.append(f11.data(), f11.size());
+
+    std::vector<uint8_t> out;
+    uint32_t type = 0;
+    check(p.pull(out, type) == PullStatus::kFrameReady, "首帧应解出");
+    check(p.pull(out, type) == PullStatus::kFrameReady, "跳过重复包后应解出下一帧");
+    check(p.stats().duplicates == 1, "duplicates 应为 1");
+    check(p.stats().seq_gaps == 0, "重复包不应被当成序号缺口");
+    check(p.stats().out_of_order == 0, "重复包不应被当成乱序");
+  }
+
+  // 乱序：序号倒退的包仍交付（数据本身有效，只是晚到），单独计数
+  {
+    PacketParser p;
+    const auto f5 = makeCloudFrame(5, 5);
+    const auto f3 = makeCloudFrame(3, 5);
+    p.append(f5.data(), f5.size());
+
+    std::vector<uint8_t> out;
+    uint32_t type = 0;
+    check(p.pull(out, type) == PullStatus::kFrameReady, "seq=5 应解出");
+    p.append(f3.data(), f3.size());
+    check(p.pull(out, type) == PullStatus::kFrameReady, "seq=3 乱序帧仍应交付");
+    check(p.stats().out_of_order == 1, "乱序应计入 out_of_order");
+    check(p.stats().seq_gaps == 0, "序号倒退不应计入 seq_gaps");
+  }
+
+  // 按报文类型分别跟踪：点云与 IMU 交错到达，两条序号互不干扰
+  {
+    PacketParser p;
+    const auto cloud0 = makeCloudFrame(0, 5);
+    const auto imu0 = makeImuFrame(0);
+    const auto cloud1 = makeCloudFrame(1, 5);
+    const auto imu1 = makeImuFrame(1);
+    p.append(cloud0.data(), cloud0.size());
+    p.append(imu0.data(), imu0.size());
+    p.append(cloud1.data(), cloud1.size());
+    p.append(imu1.data(), imu1.size());
+
+    std::vector<uint8_t> out;
+    uint32_t type = 0;
+    int got = 0;
+    while (p.pull(out, type) == PullStatus::kFrameReady) ++got;
+    check(got == 4, "点云/IMU 交错到达应解出 4 帧");
+    check(p.stats().duplicates == 0, "不同报文类型出现相同序号不是重复包");
+    check(p.stats().out_of_order == 0, "不同报文类型的序号不参与比较");
+    check(p.stats().seq_gaps == 0, "两条序号序列都连续，不应报缺口");
+  }
+
+  // uint32 回绕：0xFFFFFFFF -> 0 是正常递增，不能误报丢包或乱序
+  {
+    PacketParser p;
+    const auto fmax = makeCloudFrame(0xFFFFFFFFu, 5);
+    const auto f0 = makeCloudFrame(0, 5);
+    p.append(fmax.data(), fmax.size());
+
+    std::vector<uint8_t> out;
+    uint32_t type = 0;
+    check(p.pull(out, type) == PullStatus::kFrameReady, "seq=0xFFFFFFFF 应解出");
+    p.append(f0.data(), f0.size());
+    check(p.pull(out, type) == PullStatus::kFrameReady, "回绕后的 seq=0 应解出");
+    check(p.stats().seq_gaps == 0, "uint32 回绕不应计入 seq_gaps");
+    check(p.stats().out_of_order == 0, "uint32 回绕不应计入 out_of_order");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 6. 点云几何解码
 // ---------------------------------------------------------------------------
 static void test_point_decoding() {
-  std::printf("[5] 点云几何\n");
+  std::printf("[6] 点云几何\n");
 
   // 最简标定下，角度全为 0：所有点应落在 (0, 1, 0)
   {
@@ -445,10 +557,10 @@ static void test_point_decoding() {
 }
 
 // ---------------------------------------------------------------------------
-// 6. IMU 解码与四元数顺序
+// 7. IMU 解码与四元数顺序
 // ---------------------------------------------------------------------------
 static void test_imu() {
-  std::printf("[6] IMU 解码\n");
+  std::printf("[7] IMU 解码\n");
 
   LidarImuData body{};
   body.info.seq = 7;
@@ -504,10 +616,10 @@ static void test_imu() {
 }
 
 // ---------------------------------------------------------------------------
-// 7. 缓冲保护
+// 8. 缓冲保护
 // ---------------------------------------------------------------------------
 static void test_buffer_guard() {
-  std::printf("[7] 缓冲上限保护\n");
+  std::printf("[8] 缓冲上限保护\n");
 
   // 用很小的上限，塞大量无帧头数据，应当触发清空而不是无限增长
   PacketParser p(8192, 1024);
@@ -527,6 +639,7 @@ int main() {
   test_parser_basic();
   test_streaming();
   test_sequence();
+  test_duplicates_and_order();
   test_point_decoding();
   test_imu();
   test_buffer_guard();

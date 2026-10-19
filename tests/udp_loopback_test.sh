@@ -2,7 +2,7 @@
 # UDP loopback integration test: build the probe -> listen in background ->
 # send synthetic packets -> verify the summary.
 #
-# This is the only automated coverage for udp_receiver.cpp. The 63 assertions in
+# This is the only automated coverage for udp_receiver.cpp. The 91 assertions in
 # decoder_selftest feed bytes straight into the parser and never touch a socket;
 # in reality packets first go through recvfrom, and buffering, timeouts and
 # source addresses can only be exercised by a real send/receive.
@@ -81,6 +81,8 @@ expected = {
     "校验失败 帧尾": 0,
     "长度字段越界": 0,
     "开头非帧头的包": 0,
+    "重复包": 0,            # loopback sends each seq once; none may be dropped
+    "乱序包": 0,
 }
 
 failed = 0
@@ -117,6 +119,26 @@ if failed:
     sys.exit(1)
 print("loopback test PASSED")
 PY
+
+echo
+echo "=== Verifying probe exit code without data ==="
+# When no UDP packet arrives within --seconds the probe must return non-zero,
+# otherwise scripts mistake "wrong port / cable unplugged" for success.
+# Use the port right after the loopback one: nothing sends there.
+EMPTY_OUT="/tmp/udp_probe_no_data.txt"
+if "$PROBE_BIN" --ip "$HOST" --port "$((PORT + 1))" --seconds 1 > "$EMPTY_OUT" 2>&1; then
+  echo "  [FAIL] probe returned 0 although no UDP data was received"
+  cat "$EMPTY_OUT"
+  exit 1
+fi
+# The SO_RCVBUF line is printed only after a successful bind, so this also
+# proves the non-zero exit came from "no data" rather than a bind failure.
+if ! grep -q "SO_RCVBUF" "$EMPTY_OUT"; then
+  echo "  [FAIL] probe exited non-zero before binding, not because of missing data"
+  cat "$EMPTY_OUT"
+  exit 1
+fi
+echo "  [OK] probe returned non-zero without receiving any UDP data"
 
 echo
 echo "=== Cleanup ==="

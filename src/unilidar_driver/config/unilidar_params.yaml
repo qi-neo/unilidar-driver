@@ -37,3 +37,10 @@ unilidar_driver_node:
     poll_period_ms: 2           # 轮询收包的周期
     recv_timeout_ms: 1          # 单次 recv 超时
     diag_period_s: 5.0          # 诊断日志周期
+
+    # ---- 收包缓冲 ----
+    # 请求的 SO_RCVBUF 字节数，0 表示沿用系统默认。雷达约 180 KB/s，
+    # 内核默认 rmem 只有约 200 KB，调度抖动时会溢出丢包，所以默认请求 8 MiB。
+    # 注意：Linux 会按 net.core.rmem_max 裁剪并把请求值翻倍，诊断日志里的
+    # "SO_RCVBUF 实际 ... 字节" 才是生效值；若序号缺口持续增长就先调大它。
+    recv_buf_bytes: 8388608

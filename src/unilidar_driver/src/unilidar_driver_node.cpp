@@ -49,7 +49,7 @@ private:
     declareParams();
 
     std::string err;
-    if (!rx_.open(local_port_, local_ip_, recv_timeout_ms_, err)) {
+    if (!rx_.open(local_port_, local_ip_, recv_timeout_ms_, recv_buf_bytes_, err)) {
       RCLCPP_FATAL(get_logger(), "UDP 打开失败：%s", err.c_str());
       throw std::runtime_error("UDP 打开失败");
     }
@@ -75,6 +75,22 @@ private:
                 local_ip_.empty() ? "0.0.0.0" : local_ip_.c_str(), local_port_,
                 cloud_topic_.c_str(), cloud_frame_.c_str(), cloud_scan_num_,
                 imu_topic_.c_str(), imu_frame_.c_str(), quat_order_str_.c_str());
+    RCLCPP_INFO(get_logger(),
+                "收包缓冲 SO_RCVBUF 请求 %d 字节，内核实际生效 %d 字节"
+                "（Linux 会翻倍并受 net.core.rmem_max 裁剪）",
+                recv_buf_bytes_, rx_.recvBufBytes());
+  }
+
+  // 参数非法时不是「悄悄改成一个能跑的值」：静默回退会让用户以为配置生效了，
+  // 实际行为与配置不符，排障时极难发现。这里一律 FATAL 打印后抛异常，
+  // 由 main 捕获并以非 0 退出码结束进程。
+  [[noreturn]] void fatalParam(const std::string& msg) {
+    RCLCPP_FATAL(get_logger(), "参数非法：%s", msg.c_str());
+    throw std::runtime_error("参数非法：" + msg);
+  }
+
+  void checkParam(bool ok, const std::string& msg) {
+    if (!ok) fatalParam(msg);
   }
 
   void declareParams() {
@@ -100,12 +116,23 @@ private:
     poll_period_ms_ = declare_parameter<int>("poll_period_ms", 2);
     recv_timeout_ms_ = declare_parameter<int>("recv_timeout_ms", 1);
     diag_period_s_ = declare_parameter<double>("diag_period_s", 5.0);
+    // 雷达约 180 KB/s，内核默认 rmem（约 200 KB）在调度抖动时会溢出丢包。
+    // 0 表示不设置、沿用系统默认；默认请求 8 MiB。
+    recv_buf_bytes_ = declare_parameter<int>("recv_buf_bytes", kDefaultRecvBufBytes);
 
-    if (cloud_scan_num_ < 1) {
-      RCLCPP_WARN(get_logger(), "cloud_scan_num=%d 不合法，已改为 1", cloud_scan_num_);
-      cloud_scan_num_ = 1;
-    }
-    if (poll_period_ms_ < 1) poll_period_ms_ = 1;
+    checkParam(local_port_ >= 1 && local_port_ <= 65535,
+               "local_port=" + std::to_string(local_port_) + "，应在 1..65535 之间");
+    checkParam(quat_order_str_ == "wxyz" || quat_order_str_ == "xyzw",
+               "quaternion_order=\"" + quat_order_str_ + "\"，只接受 wxyz 或 xyzw");
+    checkParam(cloud_scan_num_ >= 1,
+               "cloud_scan_num=" + std::to_string(cloud_scan_num_) + "，应 >= 1");
+    checkParam(poll_period_ms_ >= 1,
+               "poll_period_ms=" + std::to_string(poll_period_ms_) + "，应 >= 1");
+    checkParam(range_min_ < range_max_,
+               "range_min=" + std::to_string(range_min_) + " 应小于 range_max=" +
+                   std::to_string(range_max_));
+    checkParam(recv_buf_bytes_ >= 0,
+               "recv_buf_bytes=" + std::to_string(recv_buf_bytes_) + "，应 >= 0（0 表示用系统默认）");
 
     params_.quat_order = (quat_order_str_ == "xyzw") ? QuatOrder::kXyzw : QuatOrder::kWxyz;
     params_.use_system_timestamp = use_system_timestamp_;
@@ -252,10 +279,13 @@ private:
   void logDiagnostics() {
     const ParseStats& ps = parser_.stats();
     RCLCPP_INFO(get_logger(),
-                "收到 %lu 帧 序号缺口 %lu | 点云已发 %lu（累计 %lu 点）IMU 已发 %lu | "
-                "校验错 CRC %lu 帧尾 %lu 长度 %lu | 重同步 %lu 字节 | 长度不符提示 %lu",
+                "收到 %lu 帧 序号缺口 %lu 重复包 %lu 乱序 %lu | 点云已发 %lu（累计 %lu 点）"
+                "IMU 已发 %lu | 校验错 CRC %lu 帧尾 %lu 长度 %lu | 重同步 %lu 字节 | "
+                "长度不符提示 %lu | SO_RCVBUF 实际 %d 字节",
                 static_cast<unsigned long>(ps.frames_ok),
                 static_cast<unsigned long>(ps.seq_gaps),
+                static_cast<unsigned long>(ps.duplicates),
+                static_cast<unsigned long>(ps.out_of_order),
                 static_cast<unsigned long>(clouds_published_),
                 static_cast<unsigned long>(dstats_.points_out),
                 static_cast<unsigned long>(imus_published_),
@@ -263,10 +293,23 @@ private:
                 static_cast<unsigned long>(ps.bad_tail),
                 static_cast<unsigned long>(ps.bad_size),
                 static_cast<unsigned long>(ps.resync_bytes),
-                static_cast<unsigned long>(dstats_.size_hint));
+                static_cast<unsigned long>(dstats_.size_hint),
+                rx_.recvBufBytes());
     if (filtered_ > 0) {
       RCLCPP_INFO(get_logger(), "已丢弃来自非指定来源的数据 %lu 条",
                   static_cast<unsigned long>(filtered_));
+    }
+
+    // 累计值每轮都打印，告警只看「新增」缺口，避免刷屏。
+    if (ps.seq_gaps > last_seq_gaps_) {
+      RCLCPP_WARN(get_logger(),
+                  "本周期新增序号缺口 %lu（累计 %lu）：可能正在丢包。优先确认收包缓冲是否够大——"
+                  "当前 SO_RCVBUF 实际生效 %d 字节（请求 recv_buf_bytes=%d），"
+                  "可调大到 16 MiB / 32 MiB 后重启；其次检查 poll_period_ms 是否被调度延迟、"
+                  "本机 CPU 是否过载。若缺口只在启动瞬间出现一次，通常是进程启动晚于雷达。",
+                  static_cast<unsigned long>(ps.seq_gaps - last_seq_gaps_),
+                  static_cast<unsigned long>(ps.seq_gaps), rx_.recvBufBytes(), recv_buf_bytes_);
+      last_seq_gaps_ = ps.seq_gaps;
     }
 
     if (ps.frames_ok == 0 && ps.bad_crc + ps.bad_size + ps.bad_tail > 0) {
@@ -301,6 +344,7 @@ private:
   bool publish_tf_{true};
   int poll_period_ms_{2};
   int recv_timeout_ms_{1};
+  int recv_buf_bytes_{kDefaultRecvBufBytes};
   double diag_period_s_{5.0};
 
   DecodeParams params_;
@@ -320,15 +364,20 @@ private:
   std::uint64_t clouds_published_{0};
   std::uint64_t imus_published_{0};
   std::uint64_t filtered_{0};
+  std::uint64_t last_seq_gaps_{0};  // 上一轮诊断时的 seq_gaps，用于只报新增缺口
 };
 
 int main(int argc, char** argv) {
   rclcpp::init(argc, argv);
+  int rc = 0;
   try {
     rclcpp::spin(std::make_shared<UnilidarDriverNode>());
   } catch (const std::exception& e) {
+    // 参数校验失败等致命错误必须让进程以非 0 退出，否则启动脚本/CI
+    // 只看退出码时会误以为驱动正常起来了。
     std::fprintf(stderr, "驱动退出：%s\n", e.what());
+    rc = 1;
   }
   rclcpp::shutdown();
-  return 0;
+  return rc;
 }
