@@ -203,7 +203,7 @@ std::memcpy(&pkt, frame.data(), copy_len);         // 只拷实际有的
 - 序号跳变
 - CRC32 对**已知测试向量**：`"123456789"` 应得 `0xCBF43926`
 
-本项目 `decoder_selftest.cpp` 有 63 项这样的断言。
+本项目 `decoder_selftest.cpp` 有 69 项这样的断言。
 
 **2. 变异测试，验证自检本身有效。**
 写完自检一定要确认它抓得住错——否则是假绿灯。
@@ -266,7 +266,7 @@ src/unilidar_driver/
 │   └── udp_receiver.hpp    POSIX UDP 收包
 ├── src/                    以上实现 + unilidar_driver_node.cpp（唯一碰 ROS 的文件）
 ├── examples/
-│   ├── decoder_selftest.cpp  63 项断言的离线自检
+│   ├── decoder_selftest.cpp  69 项断言的离线自检
 │   └── udp_probe.cpp         实测定界探针
 ├── launch/ config/
 └── README.md

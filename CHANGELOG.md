@@ -5,7 +5,46 @@
 
 ## [未发布]
 
-暂无。
+对应 1.1.x。主线是"把协议里照注释抄来的假设换成对着官方实现核对过的结论"。
+
+### 修复
+
+- **CRC32 覆盖范围错误。** 原实现按 `FrameTail.crc32` 的注释
+  （"crc check of head and data"）把 12 字节帧头也算进 CRC，算出
+  `crc32(frame, packet_size-12)`。官方实现的真实范围是**只有数据段**
+  `[12, packet_size-12)`：反汇编官方 `libunilidar_sdk2.a` 的
+  `LidarPacketParser::parseByte`，CRC 循环起点 `frame+12`、终点
+  `frame+packet_size-12`，长度 `packet_size-24`。两者不一致，
+  真机接上后每一帧都会被判 `bad_crc` 丢弃，点云一帧都发不出来。
+  已改为数据段覆盖，并对 `packet_size == 24`（数据段长度为 0）保持官方
+  行为：跳过校验。
+- **`quaternion_order` 默认值改为 `xyzw`。** 官方 ROS2 节点填 Imu 话题时
+  按 `x,y,z,w` 取（`orientation.x = quaternion[0]`, `...w = quaternion[3]`），
+  原默认 `wxyz` 会让发布的姿态整体错乱。官方同一文件广播 TF 时又按
+  `w,x,y,z` 取，两处互相矛盾，因此该参数保留可配，默认对齐 Imu 话题。
+
+### 新增
+
+- 离线自检 69 项（原 63 项），新增"CRC 覆盖范围"回归：
+  分别构造"只覆盖数据段"与"含帧头"的两种帧，断言前者被接受、后者被拒绝，
+  并验证 24 字节空包不走 CRC。
+- 节点诊断日志的告警文案补充 CRC 排查提示：当"一帧都没解出"且 `bad_crc`
+  持续增长时，优先怀疑 CRC 覆盖范围与固件不一致。
+- README 的"需要实机确认"从两处扩为三处，把 CRC 覆盖范围写进已知风险清单。
+
+### 验证
+
+- `decoder_selftest` 69/69 通过（clang，`-Wall -Wextra -Wpedantic -Werror`）。
+- 变异检验：把解析器换回旧实现后，新自检从 69/69 变成 36 项失败，
+  证明新增断言确实能抓住这个 bug。
+
+### 仍待实机确认
+
+- CRC 规则（若某固件确实把帧头算进去，诊断日志会显示 `bad_crc` 持续增长）。
+- 四元数顺序（静止水平时 `|w|≈1` 的那个分量即 w）。
+- 型号/协议对应关系：本实现的 `55 AA 05 0A` + 300 点/片来自官方
+  `unilidar_sdk2`，而该 SDK 官方说明是 **L2** 的 SDK；项目名与文档目前写 L1。
+  接真机第一件事应是用 `udp_probe --hex` 核对帧头与包长，再统一命名。
 
 ## [1.0.1] - 2026-10-14
 
@@ -47,7 +86,7 @@
   四个文件，源码层面不出现任何 ROS 头文件，可在无 ROS 的机器编译与自检。
 - ROS 薄节点 `unilidar_driver_node`：参数、收包、发布、TF、诊断，
   按 `SensorDataQoS` 发布以匹配下游订阅方。
-- `decoder_selftest`：63 项断言的离线自检，覆盖 CRC32 标准向量、报文定界、
+- `decoder_selftest`：69 项断言的离线自检，覆盖 CRC32 标准向量、报文定界、
   重同步、各类损坏、流式分片、序号连续性、点云几何、IMU 解码、缓冲上限。
 - `udp_probe`：实测定界探针，回答"有没有收到包、真实整包多长、CRC 是否成立"。
 - `tests/udp_loopback_test.sh` 与 `tests/send_synthetic_packets.py`：
@@ -72,5 +111,5 @@
 
 ### 已验证 / 未验证
 
-已验证：63 项自检、双编译器零警告、ASan+UBSan 无报告、真实 UDP 回环。
+已验证：69 项自检、双编译器零警告、ASan+UBSan 无报告、真实 UDP 回环。
 **未验证**：ROS 节点编译运行、接真实雷达。详见 README 的验证范围表。

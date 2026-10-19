@@ -13,7 +13,9 @@ sendto -> 内核 -> recvfrom -> 解析器，端到端确认收包与定界没有
     数据段             DataInfo 16 + InsideState 36 + CalibParam 32
                        + 线信息 36 + ranges[300] u16 + intensities[300] u8
     FrameTail    12 B   crc32 u32 | msg_type_check u32 | reserve 2 | 00 FF
-CRC32 覆盖「帧头 + 数据段」，不含帧尾本身。
+CRC32 只覆盖数据段，不含 12 B 帧头与 12 B 帧尾——这一范围是对着官方
+libunilidar_sdk2.a 里 LidarPacketParser::parseByte 的实现核对出来的
+（官方协议头注释写的 "head and data" 与实现不一致）。
 """
 
 import argparse
@@ -47,7 +49,8 @@ def seal(packet_type: int, body: bytes) -> bytes:
     total = 12 + len(body) + 12
     head = HEADER_MARK + struct.pack("<II", packet_type, total)
     payload = head + body
-    crc = crc32_iso(payload)
+    # CRC 只覆盖 body（数据段）：与官方实现一致，见文件头说明
+    crc = crc32_iso(body)
     tail = struct.pack("<II", crc, packet_type) + b"\x00\x00" + TAIL_MARK
     return payload + tail
 
