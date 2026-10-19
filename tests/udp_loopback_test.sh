@@ -2,7 +2,7 @@
 # UDP loopback integration test: build the probe -> listen in background ->
 # send synthetic packets -> verify the summary.
 #
-# This is the only automated coverage for udp_receiver.cpp. The 91 assertions in
+# This is the only automated coverage for udp_receiver.cpp. The 135 assertions in
 # decoder_selftest feed bytes straight into the parser and never touch a socket;
 # in reality packets first go through recvfrom, and buffering, timeouts and
 # source addresses can only be exercised by a real send/receive.

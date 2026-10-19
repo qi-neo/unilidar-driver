@@ -163,6 +163,23 @@ std::memcpy(&pkt, frame.data(), copy_len);         // 只拷实际有的
 `angle_min = 30°` 时解出的 z 必须精确等于 `sin(30°) = 0.5`。
 这种可手算的案例比"看起来差不多"可靠得多。
 
+**逐点时间/环号同理：先核对官方语义，再决定字段怎么填。**
+本项目补逐点 `time` / `ring` 时，先逐行读了官方
+`parseFromPacketToPointCloud`，发现两个容易凭字段名猜错的点：
+
+- `time` 不是"按有效点个数递增"，而是 `time_relative` 在 `for` 的递增表达式
+  里**每处理一个 j 都加一次** `time_increment`（被 `continue` 掉的无效点也占
+  一步），所以偏移恒为 `j × time_increment`，剔除无效点不会压缩时间轴；
+- 官方单包内每点 `ring` 写死为 `1`（一个点云报文 = 一条扫描线，整圈由
+  `cloud_scan_num` 条线拼成，官方 README 示例是 `ringNum = 18`、首条线
+  `ring = 1`）。协议里根本没有"这条线是第几环"的字段，只能由拼帧方按顺序给。
+
+这类字段的验证要把"公式"和"范围"一起断言：时间单调且步长正确、
+无效点不压缩时间轴、两种时间戳模式基准正确、拼满一圈后 ring 恰为
+`1..cloud_scan_num` 且同一线内点序号的分布符合预期。官方发布的是预编译库时，
+除了读随源码分发的参考实现，还可以反汇编确认（本项目就是这样确认官方
+二进制里 `ring` 实际写死为 1、线序只在累加器计数里的）。
+
 ### 3.4 适配层：唯一碰 ROS 的地方
 
 **QoS 必须匹配，否则就是"明明在发却收不到"。**
@@ -178,6 +195,13 @@ std::memcpy(&pkt, frame.data(), copy_len);         // 只拷实际有的
 下游常用 `pcl::fromROSMsg<pcl::PointXYZ>` 转换，它按字段名拷贝，
 所以 `x, y, z` 必须在，多一个 `intensity` 无妨（L1 是 4D 雷达，灰度是增量信息）。
 但如果你把 `x` 放在第二个字段，或者用了非 float32，下游直接转不出来。
+
+**加字段要重算 `point_step` 与对齐。**
+本项目给 PointCloud2 补 `time`(FLOAT32) 和 `ring`(UINT16) 时，字段从 4 个变 6 个，
+`point_step` 不能只按"字段大小相加"得 22——那样下一个点的 `x` 会落在
+`2 mod 4` 的地址上，任何按 float 读下一点的下游都会读到未对齐数据。
+正确做法是补 2 字节 padding 取 24（4 的倍数），并在代码注释和 README 里
+把每个字段的偏移写清楚；写入时逐字段 `memcpy`，不要假定消息缓冲区本身对齐。
 
 **静态外参和动态姿态要分开广播。**
 - `lidar → imu` 这种固定安装关系：用 `StaticTransformBroadcaster`，发一次就够；
@@ -206,9 +230,10 @@ std::memcpy(&pkt, frame.data(), copy_len);         // 只拷实际有的
 - 前面有垃圾字节（重同步）
 - `point_num` 越界、包长不足
 - 序号跳变、重复包、乱序包
+- 逐点时间单调性/步长、两种时间戳模式基准、ring 范围与拼帧后的分布
 - CRC32 对**已知测试向量**：`"123456789"` 应得 `0xCBF43926`
 
-本项目 `decoder_selftest.cpp` 有 91 项这样的断言。
+本项目 `decoder_selftest.cpp` 有 135 项这样的断言。
 
 **2. 变异测试，验证自检本身有效。**
 写完自检一定要确认它抓得住错——否则是假绿灯。
@@ -248,6 +273,7 @@ README 里分清"已验证"和"未验证"，别让读的人误以为全测过了
 - [ ] 三个越界保护都做了（字段值、字段位置、数组范围）？
 - [ ] 部分拷贝前先清零？
 - [ ] 几何公式有可手算的退化案例？
+- [ ] 逐点时间/环号的语义对着官方实现核对过（不是只看字段名猜）？
 - [ ] QoS 与所有下游消费方对齐？
 - [ ] 静态外参用 `StaticTransformBroadcaster`？
 - [ ] `declare_parameter` 与 yaml 键数量一致？
@@ -271,7 +297,7 @@ src/unilidar_driver/
 │   └── udp_receiver.hpp    POSIX UDP 收包
 ├── src/                    以上实现 + unilidar_driver_node.cpp（唯一碰 ROS 的文件）
 ├── examples/
-│   ├── decoder_selftest.cpp  91 项断言的离线自检
+│   ├── decoder_selftest.cpp  135 项断言的离线自检
 │   └── udp_probe.cpp         实测定界探针
 ├── launch/ config/
 └── README.md

@@ -25,7 +25,8 @@ ROS2 驱动：收 UDP 报文、解成标准 `PointCloud2` 与 `Imu` 话题。
 - 协议解析核心**不依赖 ROS**，可在任意有 clang 的机器上编译并跑断言
 - 报文定界只用「帧尾标识 + CRC32」，不硬编码整包长度
 - 配套 `udp_probe` 实测定界探针，5 分钟确认真实包长与 CRC
-- 91 项断言的离线自检，做过变异测试
+- 135 项断言的离线自检，做过变异测试
+- PointCloud2 带逐点 `time`（绝对秒）与 `ring`（整圈 1 基线号），可自行做运动去畸变
 - 按报文类型分别跟踪序号：重复包直接丢弃并计数，乱序与丢包分开统计
 - QoS 与常见下游对齐（`SensorDataQoS`），避免"明明在发却收不到"
 
@@ -51,7 +52,7 @@ ros2 launch unilidar_driver unilidar_driver.launch.py
 
 | 话题 | 消息类型 |
 |---|---|
-| `/unilidar/cloud` | `sensor_msgs/PointCloud2`（字段 x, y, z, intensity） |
+| `/unilidar/cloud` | `sensor_msgs/PointCloud2`（字段 x, y, z, intensity, time, ring） |
 | `/unilidar/imu` | `sensor_msgs/Imu` |
 
 脱离 ROS 的快速自检：
@@ -63,6 +64,48 @@ clang++ -std=c++17 -Wall -Wextra -Wpedantic -O1 -I src/unilidar_driver/include \
   src/unilidar_driver/src/frame_decoder.cpp src/unilidar_driver/src/udp_receiver.cpp \
   -o /tmp/decoder_selftest && /tmp/decoder_selftest
 ```
+
+## 逐点时间与环号（运动去畸变的前置）
+
+`/unilidar/cloud` 的 `PointCloud2` 带逐点时间与环号，字段布局：
+
+| 偏移 | 字段 | 类型 | 含义 |
+|---|---|---|---|
+| 0 | `x` | FLOAT32 | m |
+| 4 | `y` | FLOAT32 | m |
+| 8 | `z` | FLOAT32 | m |
+| 12 | `intensity` | FLOAT32 | 回波强度（L1 的灰度维） |
+| 16 | `time` | FLOAT32 | 绝对时间（Unix 秒）= 帧时间戳 + 该点相对偏移 |
+| 20 | `ring` | UINT16 | 该点所在扫描线在整圈中的序号，1..`cloud_scan_num` |
+| 22 | padding | 2 B | 对齐用，使 `point_step = 24` 保持 4 的倍数 |
+
+语义依据官方 `unitree_lidar_utilities.h` 的 `parseFromPacketToPointCloud`：
+
+- 第 j 个点相对帧起始的偏移 = `j × time_increment`。该函数里 `time_relative`
+  在 for 的递增表达式里**每处理一个点加一次**（被 `continue` 掉的无效点也占
+  一步），所以时间轴不会因为剔除无效点而被压缩；
+- `cloud.stamp`：`use_system_timestamp` 时取「本机此刻 − `scan_period`」，
+  否则取报文里的雷达硬件时间戳（本驱动的两种模式一致）；
+- 官方单包内把每点 `ring` 写死为 `1`：一个点云报文就是一条扫描线，整圈由
+  `cloud_scan_num`（默认 18）条线拼成，官方 README 示例输出
+  `cloud size = 5205, ringNum = 18 ... ring = 1`，即第一条线的点从 1 起算。
+  本驱动保留这个 1 基约定，由节点按拼帧顺序把真实线号写进每个点
+  （官方 SDK 2.0.2 的发布二进制里没有真实线号，只有累加器的 `ringNum` 计数）。
+
+**有了 time/ring 能做什么：** 逐点运动补偿（去畸变）、按 `ring` 重建有序
+扫描线、把 IMU 位姿按时间插值后逐点变换、多传感器时间对齐。
+
+**没做什么：** 去畸变算法本身尚未实现——它需要 IMU（姿态）与车速或运动先验，
+还要做时间同步，属于下游算法；驱动只保证 `time` / `ring` 可信。
+
+**已知限制（如实写）：**
+
+- 系统时间戳模式下每条扫描线的帧时间戳取「解码那一刻」的本机时间，同一轮
+  轮询里连续解出多条扫描线时这些时刻会非常接近，跨线逐点 `time` 可能不严格
+  单调（官方 SDK 的实现同样如此）。要拿它做去畸变，建议把
+  `use_system_timestamp` 设为 `false`，直接用雷达硬件时间戳；
+- `time` 是 float32 绝对秒，在 1.7e9 秒附近量化步长约 256 ns，对 7.7 µs
+  量级的点间步长足够，但不要用它的低几位做 ns 级对齐。
 
 ## 上手第一步：先确认包长
 
@@ -121,7 +164,7 @@ unilidar-driver/
 │   ├── include/unilidar_driver/     协议、解析、解码、收包（不依赖 ROS）
 │   ├── src/                       实现 + unilidar_driver_node.cpp（ROS 薄节点）
 │   ├── examples/
-│   │   ├── decoder_selftest.cpp   91 项断言的离线自检
+│   │   ├── decoder_selftest.cpp   135 项断言的离线自检
 │   │   └── udp_probe.cpp          实测定界探针
 │   ├── launch/ config/
 │   └── README.md                 包的详细说明
@@ -141,13 +184,13 @@ unilidar-driver/
 | Job | 内容 |
 |---|---|
 | `deps` | 依赖声明一致性：核对 `CMakeLists.txt` 的 `find_package` 与 `package.xml` 的依赖声明，漏声明即失败。见 `tools/check_deps.py` |
-| `core` | clang++ 与 g++ 两种编译器 × 普通 / ASan+UBSan 两种构建，共 4 个组合。`-Werror` 强制零警告，跑 91 项自检，另编译探针确认可用 |
+| `core` | clang++ 与 g++ 两种编译器 × 普通 / ASan+UBSan 两种构建，共 4 个组合。`-Werror` 强制零警告，跑 135 项自检，另编译探针确认可用 |
 | `udp-loopback` | 真实 UDP 回环集成测试，再叠 ASan/UBSan 跑一遍；并验证探针在收不到包时返回非 0 |
 | `ros` | 在官方 `ros:humble-ros-base` 容器里 `rosdep install --from-paths src --ignore-src -r -y` 后 `colcon build --packages-select unilidar_driver`，并确认节点/自检/探针产物可执行；再用越界 `local_port` 启动节点，确认参数校验会 FATAL 并以非 0 退出 |
 
 前三个 job 不需要 ROS：解析核心源码层面不出现 ROS 头文件，一条 `clang++` 命令加一次执行就能覆盖协议、解析、解码三层。`ros` job 专门补上「ROS 节点从未被编译验证」这块缺口——之前只有外部仓库的 CI 顺带编译过同一份代码，本仓库自己是不编译节点的。
 
-回环测试是 `udp_receiver.cpp` 唯一的自动化覆盖：91 项自检直接喂字节给解析器，不经过 socket，而缓冲、超时、来源地址只有真收发才能验证。测试资产在 `tests/`：
+回环测试是 `udp_receiver.cpp` 唯一的自动化覆盖：135 项自检直接喂字节给解析器，不经过 socket，而缓冲、超时、来源地址只有真收发才能验证。测试资产在 `tests/`：
 
 ```bash
 bash tests/udp_loopback_test.sh                                    # 普通构建
@@ -156,7 +199,7 @@ EXTRA_CXXFLAGS="-fsanitize=address,undefined -g" \
 ```
 
 **CI 仍未覆盖**：ROS 节点接真实雷达的实机运行（需要硬件与网络配置），
-以及四元数顺序、CRC 规则这类只能对着真机确认的项。
+以及四元数顺序、CRC 规则、逐点 time/ring 的实机语义这类只能对着真机确认的项。
 
 ## 已验证 / 未验证
 
@@ -165,9 +208,11 @@ EXTRA_CXXFLAGS="-fsanitize=address,undefined -g" \
 | 项目 | 状态 |
 |---|---|
 | CRC32 算法 | 已对标准测试向量 `123456789` 校验（0xCBF43926） |
-| 报文定界、重同步、CRC 篡改、帧尾篡改、长度越界、重复/乱序序号 | 离线自检 91 项断言全过 |
+| 报文定界、重同步、CRC 篡改、帧尾篡改、长度越界、重复/乱序序号 | 离线自检 135 项断言全过 |
 | CRC32 覆盖范围 | 按**官方实现**核对：反汇编 `libunilidar_sdk2.a` 的 `LidarPacketParser::parseByte`，区间为 `[frame+12, frame+packet_size-12)`；并加了"CRC 含帧头必须被拒"的回归断言。官方协议头注释与实现不一致，**真机仍待确认** |
 | 点云几何换算 | 退化标定下与解析解逐点比对（仰角 30° 时 z 应为 0.5） |
+| 逐点时间与环号语义 | 对照官方 `parseFromPacketToPointCloud` 源码（`time_relative` 每点累加、单包 `ring` 写死 1）、官方 README 示例（`ringNum = 18`、首条线 `ring = 1`）与 `appendOnePointCloud` 反汇编核对；离线自检覆盖单调性、步长、两种时间戳基准、拼帧 ring 分布。**真机数据仍待确认** |
+| PointCloud2 time/ring 字段 | `point_step = 24`，字段偏移按字节手算并写进代码注释；核心库输出由离线自检覆盖；节点侧发布路径**本机无 ROS 未编译**，只用最小 ROS 桩头文件做过语法/模板实例化检查，待 CI 的 `ros` job 与实机确认 |
 | 自检自身有效性 | 变异测试：3 处人为破坏全部被对应断言抓住 |
 | `udp_receiver` + 解析器 + 探针 | 真实 UDP 回环：7 包收到、6 帧解出、1 帧 CRC 损坏被拒 |
 | 解析核心编译 | `-Wall -Wextra -Wpedantic -Werror` 零警告，clang 与 g++ 均过 |
@@ -188,10 +233,10 @@ EXTRA_CXXFLAGS="-fsanitize=address,undefined -g" \
 | 文件 | 派生自 | 内容 |
 |---|---|---|
 | `protocol.hpp` | `unitree_lidar_protocol.h` | 报文结构体字段与顺序、报文类型常量、帧头帧尾标识字节 |
-| `frame_decoder.cpp` | `unitree_lidar_utilities.h` 的 `parseFromPacketToPointCloud` | 测距值换算、角度迭代、无效点与距离门限判定、双棱镜机构到 XYZ 的投影公式 |
+| `frame_decoder.cpp` | `unitree_lidar_utilities.h` 的 `parseFromPacketToPointCloud` | 测距值换算、角度迭代、无效点与距离门限判定、双棱镜机构到 XYZ 的投影公式、逐点时间偏移（`j × time_increment`）的累加方式 |
 
 除此之外全部是自研实现：socket 封装、帧定界与重同步、三道越界保护、统计诊断、
-ROS 适配层、91 项自检、`udp_probe` 探针、回环测试、方法论文档。
+ROS 适配层、135 项自检、`udp_probe` 探针、回环测试、方法论文档。
 其中 CRC32 是标准 CRC-32/ISO-HDLC，属公开标准算法，不专属任何厂商。
 
 两个派生文件的头部均已按 BSD-3-Clause 第 1 条**保留原始版权声明**，并逐项列出

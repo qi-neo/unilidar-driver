@@ -17,7 +17,8 @@ unilidar_driver_node:
 
     # ---- 点云 ----
     # 多少条扫描线合成一帧点云。雷达约 180Hz 出扫描线，
-    # 18 条约合 10Hz 的点云，与 v2 预瞄节点的输入节奏匹配
+    # 18 条约合 10Hz 的点云，与 v2 预瞄节点的输入节奏匹配。
+    # 点云逐点 ring 字段的取值就是 1..cloud_scan_num（1 基线号）。
     cloud_scan_num: 18
     range_min: 0.0              # 有效最近距离 m
     range_max: 100.0            # 有效最远距离 m
