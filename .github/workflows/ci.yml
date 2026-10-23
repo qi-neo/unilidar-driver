@@ -39,7 +39,7 @@ jobs:
 
       # 核心库不依赖 ROS，也不需要 PCL，所以这里不用装任何东西，
       # 一条编译命令加一次执行就能覆盖协议、解析、解码三层。
-      - name: 编译并运行 135 项离线自检
+      - name: 编译并运行 198 项离线自检
         run: |
           set -e
           EXTRA=""
@@ -56,6 +56,24 @@ jobs:
             -o decoder_selftest
           # 开了 ASan 时顺便查泄漏；没开时这个变量被忽略
           ASAN_OPTIONS=detect_leaks=1 ./decoder_selftest
+
+      - name: 编译并运行 63 项串口接收自检（PTY 虚拟串口）
+        run: |
+          set -e
+          EXTRA=""
+          if [ "${{ matrix.sanitizer }}" = "asan" ]; then
+            EXTRA="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+          fi
+          # SerialReceiver 走的是与 /dev/ttyUSB0 完全相同的 termios 路径，
+          # 这里用 PTY 主从对模拟，不依赖真雷达也不依赖真串口。
+          ${{ matrix.cxx }} -std=c++17 -Wall -Wextra -Wpedantic -Werror -O1 $EXTRA \
+            -I src/unilidar_driver/include \
+            src/unilidar_driver/examples/serial_receiver_selftest.cpp \
+            src/unilidar_driver/src/protocol.cpp \
+            src/unilidar_driver/src/packet_parser.cpp \
+            src/unilidar_driver/src/serial_receiver.cpp \
+            -o serial_receiver_selftest
+          ASAN_OPTIONS=detect_leaks=1 ./serial_receiver_selftest
 
       - name: 编译探针并确认可用
         run: |
@@ -139,9 +157,12 @@ jobs:
           test -x "$BIN/unilidar_driver_node"
           test -x "$BIN/decoder_selftest"
           test -x "$BIN/udp_probe"
+          test -x "$BIN/serial_receiver_selftest"
           # 装出来的自检与探针也能跑，确认没有链接问题
           "$BIN/decoder_selftest"
           "$BIN/udp_probe" --help > /dev/null
+          # 串口自检用 PTY 虚拟串口，容器里同样可跑
+          "$BIN/serial_receiver_selftest"
 
           # 参数校验要 FATAL 后以非 0 退出，而不是静默回退：用越界端口启动节点，
           # 期望进程失败且日志里出现「参数非法」。这条同时验证了节点能真正跑起来。
@@ -152,6 +173,22 @@ jobs:
           printf '%s\n' "$OUT"
           if [ "$RC" -eq 0 ]; then
             echo "参数校验未生效：local_port=70000 时节点仍以退出码 0 结束"
+            exit 1
+          fi
+          if ! printf '%s' "$OUT" | grep -q "参数非法"; then
+            echo "节点非 0 退出，但不是因为参数校验失败（日志中没有『参数非法』）"
+            exit 1
+          fi
+
+          # 传输层参数同样要走校验：不认识的 transport 必须 FATAL 退出，
+          # 不能静默回退到某一条路径（用户会以为配置生效了）。
+          set +e
+          OUT=$(timeout 20 "$BIN/unilidar_driver_node" --ros-args -p transport:=carrier_pigeon 2>&1)
+          RC=$?
+          set -e
+          printf '%s\n' "$OUT"
+          if [ "$RC" -eq 0 ]; then
+            echo "参数校验未生效：transport=carrier_pigeon 时节点仍以退出码 0 结束"
             exit 1
           fi
           if ! printf '%s' "$OUT" | grep -q "参数非法"; then

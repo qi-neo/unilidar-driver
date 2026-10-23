@@ -7,7 +7,8 @@
 
 对应 1.1.x。主线是"把协议里照注释抄来的假设换成对着官方实现核对过的结论"，
 并把收包路径的健壮性补齐：缓冲可配、序号异常可分辨、参数非法直接失败；
-再补上逐点 `time` / `ring`，为下游运动去畸变打基础。
+再补上逐点 `time` / `ring`，为下游运动去畸变打基础；最后补上实物默认的
+串口接收路径（此前只有 UDP）。
 
 ### 修复
 
@@ -40,6 +41,26 @@
 
 ### 新增
 
+- **串口接收：实物默认路径。** L1 的原生通讯接口是 TTL UART，官方 SDK 默认
+  经 CH340 类模块以 2,000,000 bps 转 USB 接入（`/dev/ttyUSB0`，需 `dialout`
+  权限）。新增 `serial_receiver`（POSIX termios：`O_NONBLOCK` + `cfmakeraw`
+  + `CLOCAL` + 关硬件流控 + `VMIN=0/VTIME=0`；打开前 `isatty` 确认是终端
+  设备，打开后 `tcflush` 丢掉积压旧字节；读契约与 `udp_receiver` 一致：
+  0 = 当前无数据，-1 = 出错）。报文定界完全复用 `packet_parser`——串口是
+  字节流，解析器本就按无边界字节流设计，可在任意位置开始接收。波特率是否
+  可配置由 `serialBaudSupported()` 提前问出（平台 termios 常量表只到
+  38400 是 POSIX 保证，2 Mbps 是各平台扩展）。节点新增 `transport` 参数
+  （`serial` 默认 / `udp` 备选）与 `serial_device`、`serial_baud`；诊断日志
+  与启动告警按传输层分别给出排障建议（串口路径查设备枚举 / `dialout` /
+  波特率 / 线序共地，UDP 路径查 IP 端口与 `SO_RCVBUF`）。
+- **`serial_receiver_selftest`：63 项串口自检。** 用 PTY 主从对
+  （`posix_openpt`/`grantpt`/`unlockpt`/`ptsname`）造虚拟串口，测试进程写
+  主端、`SerialReceiver` 读从端，走与 `/dev/ttyUSB0` 完全相同的 termios
+  代码路径，不需要真雷达也不需要真串口。覆盖：波特率支持表、打开失败
+  路径（设备不存在 / 非终端 / 坏波特率 / 未打开即读）、整帧直达、跨写
+  拆包、垃圾与伪帧头重同步、无数据契约、一次写入多帧、IMU 帧。CI 的
+  `core` job 增加该自检（双编译器 × ASan 共 4 组合），`ros` job 增加
+  容器内运行与非法 `transport` 的参数校验断言。
 - **CI 增加 ROS 节点编译。** 新增 `ros` job：在官方 `ros:humble-ros-base`
   容器里安装 `python3-colcon-common-extensions` 与 `rosdep`，
   `rosdep install --from-paths src --ignore-src -r -y` 后
