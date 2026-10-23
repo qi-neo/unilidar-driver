@@ -168,6 +168,23 @@ clang++ -std=c++17 -Wall -Wextra -Wpedantic -O1 -I src/unilidar_driver/include \
 `range_min < range_max`、`quaternion_order`、`recv_buf_bytes` 非法时节点会
 `FATAL` 打印原因并以非 0 退出，不会静默回退到一个「看起来能跑」的值。
 
+### 3. 传输层：USB 串口（CH340）还是以太网 UDP
+
+L1 的原生通讯接口是 **TTL UART**（官网参数表即标注「通讯接口：TTL UART」），
+宇树官方 SDK 的**默认**连接方式就是 USB 串口：`L1 (TTL UART) → CH340 转接模块
+→ USB → /dev/ttyUSB0`，波特率 **2,000,000 bps**，需要 `dialout` 权限。
+上面的网络地址（`192.168.1.62:6101`）属于**备选路径**——需要串口转 UDP
+转接板或带网口的 L1 版本。
+
+本驱动当前只实现 **UDP 接收**（`udp_receiver`），没有串口接收实现。
+协议层与传输层是解耦的：`packet_parser` 按「无边界字节流」设计（串口可能在
+任意位置开始接收），补一个 serial receiver 即可复用全部解析逻辑，不必动协议层。
+
+> ⚠️ **CH340 在 2 Mbps 下需实测。** CH340 标称支持到 2 Mbps，但 Linux 走
+> `ch341` 驱动，对这类非常规波特率的支持并非各版本都稳。能识别设备但收不到
+> 数据 / 大量坏帧时，优先怀疑波特率与转接芯片（换 CP2102 / FT232 对照），
+> 而不是雷达本身。
+
 ## 相对官方节点的修正
 
 **QoS 不兼容。** 官方节点用 `create_publisher(..., 10)`，即 RELIABLE；
@@ -198,4 +215,4 @@ RELIABLE 与 BEST_EFFORT 不兼容，表现为「官方节点明明在发，v3 �
 | 解析核心编译 | `-Wall -Wextra -Wpedantic` 零警告 |
 | ROS 节点编译 | 本仓库 CI 的 `ros` job 在 `ros:humble-ros-base` 容器里 `rosdep install` + `colcon build`，并用越界参数验证节点会 FATAL 退出（本地无 ROS，首次运行结果待 CI） |
 | **ROS 节点实机运行** | **未验证**，需接雷达后按上面的流程核对 |
-| **接真实雷达** | **未验证**，需按上面的探针流程核对 |
+| **接真实雷达** | **未验证**，需按上面的探针流程核对（实物走 CH340 串口时，先 `ls /dev/ttyUSB*` 确认枚举、波特率设 2,000,000、用户属 `dialout`） |
