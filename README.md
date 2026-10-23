@@ -30,6 +30,10 @@ ROS2 驱动：收 UDP 报文、解成标准 `PointCloud2` 与 `Imu` 话题。
 - 按报文类型分别跟踪序号：重复包直接丢弃并计数，乱序与丢包分开统计
 - QoS 与常见下游对齐（`SensorDataQoS`），避免"明明在发却收不到"
 
+## 硬件集成 / Hardware
+
+本仓库为纯软件驱动；与其配套的物理集成件（UniLiDAR L1 的转接与减振安装：12 V 供电、以太网 breakout、安装基准与减振）见 [`hardware/`](hardware/README.md)。更完整的硬件系统（执行层、电源、急停、传感器接口）见 [`active-suspension-lidar-preview` 的 hardware/](https://github.com/qi-neo/active-suspension-lidar-preview/tree/main/hardware)，本仓库不重复放控制/电源类硬件。
+
 ## 快速开始
 
 ```bash
