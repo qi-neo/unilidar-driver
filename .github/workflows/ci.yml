@@ -96,6 +96,27 @@ jobs:
             -o serial_stress_selftest
           ASAN_OPTIONS=detect_leaks=1 ./serial_stress_selftest --seconds 3 --quiet
 
+      # 节点主循环（收包→定界→解码→拼帧）已抽成不依赖 ROS 的 DriverLoop，
+      # 节点把发布当回调塞进去，所以这段能在这里离线实测：吞吐、单轮耗时
+      # 分布、定界缓冲深度、超载整批丢弃与恢复。跑的是真机上跑的同一份代码。
+      - name: 编译并运行 28 项节点主循环自检（2 Mbps，2 s）
+        run: |
+          set -e
+          EXTRA=""
+          if [ "${{ matrix.sanitizer }}" = "asan" ]; then
+            EXTRA="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+          fi
+          ${{ matrix.cxx }} -std=c++17 -Wall -Wextra -Wpedantic -Werror -O1 $EXTRA \
+            -I src/unilidar_driver/include \
+            src/unilidar_driver/examples/node_loop_selftest.cpp \
+            src/unilidar_driver/src/protocol.cpp \
+            src/unilidar_driver/src/packet_parser.cpp \
+            src/unilidar_driver/src/frame_decoder.cpp \
+            src/unilidar_driver/src/serial_receiver.cpp \
+            src/unilidar_driver/src/driver_loop.cpp \
+            -o node_loop_selftest
+          ASAN_OPTIONS=detect_leaks=1 ./node_loop_selftest --seconds 2 --quiet
+
       - name: 编译探针并确认可用
         run: |
           set -e
@@ -180,6 +201,7 @@ jobs:
           test -x "$BIN/udp_probe"
           test -x "$BIN/serial_receiver_selftest"
           test -x "$BIN/serial_stress_selftest"
+          test -x "$BIN/node_loop_selftest"
           # 装出来的自检与探针也能跑，确认没有链接问题
           "$BIN/decoder_selftest"
           "$BIN/udp_probe" --help > /dev/null
@@ -187,6 +209,8 @@ jobs:
           "$BIN/serial_receiver_selftest"
           # 压力自检取 3 秒，容器里灌入速率同样跑得满 2 Mbps
           "$BIN/serial_stress_selftest" --seconds 3 --quiet
+          # 节点主循环自检同样在容器里跑（真机跑的就是这份 DriverLoop）
+          "$BIN/node_loop_selftest" --seconds 2 --quiet
 
           # 参数校验要 FATAL 后以非 0 退出，而不是静默回退：用越界端口启动节点，
           # 期望进程失败且日志里出现「参数非法」。这条同时验证了节点能真正跑起来。

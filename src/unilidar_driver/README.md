@@ -30,6 +30,7 @@ src/unilidar_driver/
 │   ├── protocol.hpp        帧结构（1 字节打包）与 CRC32
 │   ├── packet_parser.hpp   字节流 -> 整包，支持重同步
 │   ├── frame_decoder.hpp   整包 -> 点云 / IMU
+│   ├── driver_loop.hpp     主循环：收包 -> 定界 -> 解码 -> 拼帧（不依赖 ROS）
 │   ├── udp_receiver.hpp    POSIX UDP 收包（备选路径）
 │   └── serial_receiver.hpp POSIX 串口收字节（实物默认路径）
 ├── src/                    以上五个的实现 + unilidar_driver_node.cpp（ROS 薄节点）
@@ -37,7 +38,8 @@ src/unilidar_driver/
 │   ├── decoder_selftest.cpp        离线自检，151 项断言
 │   ├── serial_receiver_selftest.cpp 串口接收自检（PTY 虚拟串口），64 项断言（macOS 63）
 │   ├── serial_stress_selftest.cpp  串口压力自检（PTY 2 Mbps 灌入），14 项断言
-│   ├── selftest_fixture.hpp        两个串口自检共用的测试基建
+│   ├── node_loop_selftest.cpp      节点主循环自检（实时性与背压），28 项断言
+│   ├── selftest_fixture.hpp        三个串口自检共用的测试基建
 │   └── udp_probe.cpp               实测定界探针
 ├── launch/unilidar_driver.launch.py
 └── config/unilidar_params.yaml

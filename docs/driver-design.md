@@ -219,7 +219,7 @@ std::memcpy(&pkt, frame.data(), copy_len);         // 只拷实际有的
 驱动的宿命是"接上硬件才知道对不对"。所以必须**主动留下脱离硬件的验证路径**，
 否则每次改驱动都要搬着一台雷达调试。
 
-按成本从低到高，五件事值得做：
+按成本从低到高，七件事值得做：
 
 **1. 合成报文做 round-trip 自检。**
 自己按协议构造一帧报文（算好 CRC），喂给解析器，断言能解出来；
@@ -283,6 +283,13 @@ README 里分清"已验证"和"未验证"，别让读的人误以为全测过了
 job 正是 `-O1`。内存类缺陷的回归用例要转成可观测行为来断言，见
 `decoder_selftest.cpp` 的 `[10] P0 缺陷回归`。
 
+
+**7. 把主循环从框架里抽出来，让"实时性"可测。**
+节点里真正有行为的只有「收包 → 定界 → 解码 → 拼帧」这一段。它埋在 ROS 节点
+里时，吞吐、单轮耗时、缓冲增长全都只能靠真机观测；抽成不依赖 ROS 的
+`DriverLoop`、把发布当回调注入之后，这一段就能在普通机器上灌满码率实测——
+节点与自检跑的是同一份代码，也就不存在两套逻辑各自漂移。
+
 ---
 
 ## 五、检查清单
@@ -322,13 +329,15 @@ src/unilidar_driver/
 │   ├── packet_parser.hpp   字节流 → 整包，支持重同步
 │   ├── frame_decoder.hpp   整包 → 点云 / IMU
 │   ├── serial_receiver.hpp POSIX termios 串口收包（L1 实物默认路径）
+│   ├── driver_loop.hpp     主循环：收包 → 定界 → 解码 → 拼帧（不依赖 ROS）
 │   └── udp_receiver.hpp    POSIX UDP 收包
 ├── src/                    以上实现 + unilidar_driver_node.cpp（唯一碰 ROS 的文件）
 ├── examples/
 │   ├── decoder_selftest.cpp  151 项断言的离线自检
 │   ├── serial_receiver_selftest.cpp 串口接收自检（PTY 虚拟串口），64 项断言
 │   ├── serial_stress_selftest.cpp 串口压力自检（PTY 满码率灌入），14 项断言
-│   ├── selftest_fixture.hpp  两个串口自检共用的测试基建
+│   ├── node_loop_selftest.cpp 节点主循环自检（实时性与背压），28 项断言
+│   ├── selftest_fixture.hpp  三个串口自检共用的测试基建
 │   └── udp_probe.cpp         实测定界探针
 ├── launch/ config/
 └── README.md

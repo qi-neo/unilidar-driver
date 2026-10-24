@@ -22,6 +22,7 @@ add_library(unilidar_driver_core STATIC
   src/frame_decoder.cpp
   src/udp_receiver.cpp
   src/serial_receiver.cpp
+  src/driver_loop.cpp
 )
 set_target_properties(unilidar_driver_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(unilidar_driver_core PUBLIC
@@ -46,6 +47,11 @@ target_link_libraries(serial_receiver_selftest unilidar_driver_core)
 add_executable(serial_stress_selftest examples/serial_stress_selftest.cpp)
 target_link_libraries(serial_stress_selftest unilidar_driver_core)
 
+# 节点主循环自检：与 ROS 节点跑同一份 DriverLoop，测吞吐、单轮耗时分布、
+# 定界缓冲深度与超载丢弃/恢复。参数 --seconds 控制时长
+add_executable(node_loop_selftest examples/node_loop_selftest.cpp)
+target_link_libraries(node_loop_selftest unilidar_driver_core)
+
 # ROS 节点：只做参数、收包与发布的接线
 add_executable(unilidar_driver_node src/unilidar_driver_node.cpp)
 target_link_libraries(unilidar_driver_node unilidar_driver_core)
@@ -59,6 +65,7 @@ install(TARGETS
   udp_probe
   serial_receiver_selftest
   serial_stress_selftest
+  node_loop_selftest
   DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY launch config

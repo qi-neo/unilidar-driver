@@ -26,6 +26,7 @@
 #include <tf2_ros/static_transform_broadcaster.h>
 #include <tf2_ros/transform_broadcaster.h>
 
+#include "unilidar_driver/driver_loop.hpp"
 #include "unilidar_driver/frame_decoder.hpp"
 #include "unilidar_driver/packet_parser.hpp"
 #include "unilidar_driver/serial_receiver.hpp"
@@ -58,6 +59,15 @@ public:
 private:
   void init() {
     declareParams();
+
+    // 主循环在参数校验之后构造：拼帧条数等都已确定。两个 sink 只做发布，
+    // 协议部分全部在 DriverLoop 里（与 node_loop_selftest 跑的是同一份代码）。
+    LoopConfig loop_cfg;
+    loop_cfg.cloud_scan_num = static_cast<std::size_t>(cloud_scan_num_);
+    loop_ = std::make_unique<DriverLoop>(
+        loop_cfg, params_,
+        [this](const std::vector<PointXYZIT>& pts, double stamp) { publishCloud(pts, stamp); },
+        [this](const ImuSample& s) { publishImu(s); });
 
     std::string err;
     if (transport_ == Transport::kSerial) {
@@ -234,74 +244,28 @@ private:
     tf_broadcaster_->sendTransform(tf);
   }
 
+  // 收包交给 DriverLoop：本节点只提供"从哪读"，定界/解码/拼帧都在核心库里。
+  // 串口是字节流，不存在「一条报文一次 read」的边界，readSome 返回多少就喂
+  // 多少；0 = 当前无数据（非阻塞）。
   void pollOnce() {
-    std::uint8_t buf[65536];
-    for (int i = 0; i < kMaxRecvPerPoll; ++i) {
-      std::string err;
+    std::string err;
+    auto read = [this](std::uint8_t* buf, std::size_t cap, std::string& e) -> int {
       std::string src;
       int n = 0;
       if (transport_ == Transport::kSerial) {
-        // 串口是字节流：不存在「一条报文一次 read」的边界，readSome 返回多少
-        // 就喂多少，定界交给 packet_parser。0 = 当前无数据（非阻塞）。
-        n = serial_rx_.readSome(buf, sizeof(buf), err);
+        n = serial_rx_.readSome(buf, cap, e);
       } else {
-        n = rx_.receive(buf, sizeof(buf), err, &src);
-      }
-      if (n == 0) break;  // 本轮没有更多数据
-      if (n < 0) {
-        RCLCPP_ERROR(get_logger(), "%s", err.c_str());
-        break;
+        n = rx_.receive(buf, cap, e, &src);
       }
       // 指定了来源 IP 时只认那台雷达，避免别人的点云混进控制环（仅 UDP 有意义）
-      if (transport_ == Transport::kUdp && !source_ip_.empty() && src != source_ip_) {
+      if (n > 0 && transport_ == Transport::kUdp && !source_ip_.empty() && src != source_ip_) {
         filtered_++;
-        continue;
+        return 0;  // 当作"本轮没有更多数据"，继续下一轮
       }
-      parser_.append(buf, static_cast<std::size_t>(n));
-    }
-    drainFrames();
-  }
-
-  void drainFrames() {
-    std::vector<std::uint8_t> frame;
-    std::uint32_t type = 0;
-    while (parser_.pull(frame, type) == PullStatus::kFrameReady) {
-      if (type == kTypePointCloud3D) {
-        handleCloud(frame);
-      } else if (type == kTypeImu) {
-        handleImu(frame);
-      }
-    }
-  }
-
-  void handleCloud(const std::vector<std::uint8_t>& frame) {
-    // ring = 这条扫描线在整圈中的序号（1 基，与官方 SDK 的 ring 从 1 起算一致）。
-    // 协议里一个点云报文就是一条扫描线，单包内没有"第几条线"字段（官方单包内
-    // 每点 ring 写死为 1），只能由拼帧顺序给出：本帧第 k 条线（k 从 0 起）→ k+1。
-    std::vector<PointXYZIT> pts;
-    double stamp = 0.0;
-    const std::uint16_t ring = static_cast<std::uint16_t>(pending_scans_ + 1);
-    if (!decodePointCloud(frame, params_, wallNowSec(), pts, stamp, dstats_, ring)) return;
-
-    if (pending_scans_ == 0) pending_stamp_ = stamp;
-    // 解码器给的 time 是相对**本条线**起始时刻的偏移；发布的这一帧以第一条线的
-    // 起始时刻作 header.stamp，所以要把后续每条线整体平移 (本线 - 首线)，
-    // 使全帧的 time 都以 header.stamp 为基准。这样跨线时间仍然连续递增，
-    // 且 float 只在 0..0.2 s 的小量级上量化，精度才有意义。
-    const double line_shift = stamp - pending_stamp_;
-    if (line_shift != 0.0) {
-      for (PointXYZIT& p : pts) {
-        p.time = static_cast<float>(static_cast<double>(p.time) + line_shift);
-      }
-    }
-    pending_.insert(pending_.end(), pts.begin(), pts.end());
-    ++pending_scans_;
-
-    if (pending_scans_ >= static_cast<std::size_t>(cloud_scan_num_)) {
-      publishCloud(pending_, pending_stamp_);
-      pending_.clear();
-      pending_scans_ = 0;
-    }
+      return n;
+    };
+    loop_->pollOnce(read, wallNowSec(), &err);
+    if (!err.empty()) RCLCPP_ERROR(get_logger(), "%s", err.c_str());
   }
 
   // PointCloud2 字段布局（point_step = 24）：
@@ -364,13 +328,9 @@ private:
     }
 
     cloud_pub_->publish(msg);
-    clouds_published_++;
   }
 
-  void handleImu(const std::vector<std::uint8_t>& frame) {
-    ImuSample s;
-    if (!decodeImu(frame, params_, wallNowSec(), s, dstats_)) return;
-
+  void publishImu(const ImuSample& s) {
     sensor_msgs::msg::Imu msg;
     msg.header.stamp = toRosTime(s.stamp);
     msg.header.frame_id = imu_frame_;
@@ -386,12 +346,13 @@ private:
     msg.linear_acceleration.z = s.linear_acceleration[2];
 
     imu_pub_->publish(msg);
-    imus_published_++;
     publishImuTf(s);
   }
 
   void logDiagnostics() {
-    const ParseStats& ps = parser_.stats();
+    const ParseStats& ps = loop_->parseStats();
+    const DecodeStats& ds = loop_->decodeStats();
+    const LoopStats& ls = loop_->stats();
     RCLCPP_INFO(get_logger(),
                 "收到 %lu 帧 序号缺口 %lu 重复包 %lu 乱序 %lu | 点云已发 %lu（累计 %lu 点）"
                 "IMU 已发 %lu | 校验错 CRC %lu 帧尾 %lu 长度 %lu | 重同步 %lu 字节 | "
@@ -400,15 +361,30 @@ private:
                 static_cast<unsigned long>(ps.seq_gaps),
                 static_cast<unsigned long>(ps.duplicates),
                 static_cast<unsigned long>(ps.out_of_order),
-                static_cast<unsigned long>(clouds_published_),
-                static_cast<unsigned long>(dstats_.points_out),
-                static_cast<unsigned long>(imus_published_),
+                static_cast<unsigned long>(ls.clouds_published),
+                static_cast<unsigned long>(ds.points_out),
+                static_cast<unsigned long>(ls.imus_published),
                 static_cast<unsigned long>(ps.bad_crc),
                 static_cast<unsigned long>(ps.bad_tail),
                 static_cast<unsigned long>(ps.bad_size),
                 static_cast<unsigned long>(ps.resync_bytes),
-                static_cast<unsigned long>(dstats_.size_hint),
-                static_cast<unsigned long>(dstats_.time_increment_invalid));
+                static_cast<unsigned long>(ds.size_hint),
+                static_cast<unsigned long>(ds.time_increment_invalid));
+    // 实时性与背压：吞吐、单轮耗时、定界缓冲深度。缓冲持续贴近上限即消费跟
+    // 不上生产，是本节点唯一会静默丢帧的路径——把它打印出来才有得判读。
+    RCLCPP_INFO(get_logger(),
+                "吞吐 %.2f Mbps（%lu 帧 / %.1f s）| 轮询 %lu 次 均值 %.3f ms p99 %.3f ms "
+                "最大 %.3f ms | 定界缓冲 当前 %zu B 峰值 %zu B / 上限 %zu B | "
+                "整批丢弃 %lu 次 读满单轮上限 %lu 次 读错误 %lu",
+                ls.bytes_read * 8.0 / 1e6 / (diag_period_s_ > 0 ? diag_period_s_ : 1.0),
+                static_cast<unsigned long>(ls.frames_decoded),
+                diag_period_s_,
+                static_cast<unsigned long>(ls.polls), loop_->avgPollNs() / 1e6,
+                loop_->pollNsP99() / 1e6, loop_->pollNsMax() / 1e6,
+                loop_->buffered(), ls.buffered_peak, loop_->bufferedLimit(),
+                static_cast<unsigned long>(ps.buffer_overflow),
+                static_cast<unsigned long>(ls.read_capped_polls),
+                static_cast<unsigned long>(ls.read_errors));
     if (transport_ == Transport::kUdp) {
       RCLCPP_INFO(get_logger(), "UDP 收包缓冲 SO_RCVBUF 实际生效 %d 字节（请求 recv_buf_bytes=%d）",
                   rx_.recvBufBytes(), recv_buf_bytes_);
@@ -456,32 +432,30 @@ private:
                     "先验证本机 PTY 上的定界逻辑。");
       }
     }
-    if (dstats_.size_hint > 0) {
+    if (ds.size_hint > 0) {
       if (transport_ == Transport::kUdp) {
         RCLCPP_WARN(get_logger(),
                     "整包长度与本驱动预期不同（累计 %lu 次）。若点云形状明显不对，"
                     "请把 udp_probe 报告的实际长度反馈回来核对固件版本。",
-                    static_cast<unsigned long>(dstats_.size_hint));
+                    static_cast<unsigned long>(ds.size_hint));
       } else {
         RCLCPP_WARN(get_logger(),
                     "整包长度与本驱动预期不同（累计 %lu 次）。若点云形状明显不对，"
                     "请记录串口实际收到的整包长度反馈回来核对固件版本"
                     "（可用 od 抓包或临时加打印统计）。",
-                    static_cast<unsigned long>(dstats_.size_hint));
+                    static_cast<unsigned long>(ds.size_hint));
       }
     }
     // time_increment 是逐点时间唯一的来源；它无效时 time 偏移全为 0，
     // 去畸变会算成"整条线同一时刻"，必须让用户看见。
-    if (dstats_.time_increment_invalid > 0 && !warned_time_increment_) {
+    if (ds.time_increment_invalid > 0 && !warned_time_increment_) {
       warned_time_increment_ = true;
       RCLCPP_WARN(get_logger(),
                   "报文里的 time_increment 非正或非有限（累计 %lu 次），逐点 time 会退化为"
                   "帧时间戳本身。要用逐点时间去畸变，先核对固件输出的该字段。",
-                  static_cast<unsigned long>(dstats_.time_increment_invalid));
+                  static_cast<unsigned long>(ds.time_increment_invalid));
     }
   }
-
-  static constexpr int kMaxRecvPerPoll = 64;
 
   Transport transport_{Transport::kSerial};
   std::string serial_device_;
@@ -506,8 +480,10 @@ private:
   double diag_period_s_{5.0};
 
   DecodeParams params_;
-  DecodeStats dstats_;
-  PacketParser parser_;
+  // 主循环（收包 → 定界 → 解码 → 拼帧）抽在核心库里，节点只把"发布"当回调
+  // 塞进去。实时性与背压因此可以在没有 ROS、没有雷达的机器上离线实测，
+  // 节点与自检跑的是同一份循环代码。
+  std::unique_ptr<DriverLoop> loop_;
   SerialReceiver serial_rx_;  // transport=serial 时使用
   UdpReceiver rx_;           // transport=udp 时使用
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_pub_;
@@ -517,11 +493,6 @@ private:
   rclcpp::TimerBase::SharedPtr poll_timer_;
   rclcpp::TimerBase::SharedPtr diag_timer_;
 
-  std::vector<PointXYZIT> pending_;
-  std::size_t pending_scans_{0};
-  double pending_stamp_{0.0};
-  std::uint64_t clouds_published_{0};
-  std::uint64_t imus_published_{0};
   std::uint64_t filtered_{0};
   std::uint64_t last_seq_gaps_{0};  // 上一轮诊断时的 seq_gaps，用于只报新增缺口
   bool warned_time_increment_{false};  // time_increment 无效只告警一次，避免刷屏
