@@ -34,7 +34,7 @@ src/unilidar_driver/
 │   └── serial_receiver.hpp POSIX 串口收字节（实物默认路径）
 ├── src/                    以上五个的实现 + unilidar_driver_node.cpp（ROS 薄节点）
 ├── examples/
-│   ├── decoder_selftest.cpp        离线自检，135 项断言
+│   ├── decoder_selftest.cpp        离线自检，151 项断言
 │   ├── serial_receiver_selftest.cpp 串口接收自检（PTY 虚拟串口），64 项断言（macOS 63）
 │   ├── serial_stress_selftest.cpp  串口压力自检（PTY 2 Mbps 灌入），14 项断言
 │   ├── selftest_fixture.hpp        两个串口自检共用的测试基建
@@ -65,7 +65,7 @@ ros2 launch unilidar_driver unilidar_driver.launch.py
 脱离 ROS 的快速自检（任何有 clang 的机器，路径相对于仓库根目录）：
 
 ```bash
-# 报文解析与解码：135 项断言
+# 报文解析与解码：151 项断言
 clang++ -std=c++17 -Wall -Wextra -Wpedantic -O1 -I src/unilidar_driver/include \
   src/unilidar_driver/examples/decoder_selftest.cpp \
   src/unilidar_driver/src/protocol.cpp src/unilidar_driver/src/packet_parser.cpp \
@@ -94,7 +94,7 @@ clang++ -std=c++17 -Wall -Wextra -Wpedantic -O1 -I src/unilidar_driver/include \
 | 偏移 | 字段 | 类型 | 含义 |
 |---|---|---|---|
 | 0 / 4 / 8 / 12 | `x` `y` `z` `intensity` | FLOAT32 | 坐标 m 与回波强度 |
-| 16 | `time` | FLOAT32 | 绝对时间（Unix 秒）= 帧时间戳 + 该点相对偏移 |
+| 16 | `time` | FLOAT32 | 相对 `header.stamp` 的偏移秒数（**不是**绝对 Unix 时间） |
 | 20 | `ring` | UINT16 | 该扫描线在整圈中的 1 基序号（1..`cloud_scan_num`） |
 | 22 | padding | 2 B | 对齐用，使 `point_step = 24` 保持 4 的倍数 |
 
@@ -117,8 +117,14 @@ clang++ -std=c++17 -Wall -Wextra -Wpedantic -O1 -I src/unilidar_driver/include \
 
 **已知限制：** 系统时间戳模式下每条线的帧时间戳是「解码那一刻」，同一轮轮询里
 连解多条线时跨线 `time` 可能不严格单调（官方 SDK 同样如此），做去畸变建议把
-`use_system_timestamp` 设为 `false` 用硬件时间戳；`time` 是 float32 绝对秒，
-1.7e9 秒附近量化步长约 256 ns，对 7.7 µs 量级的点间步长足够。
+`use_system_timestamp` 设为 `false` 用硬件时间戳。
+
+**为什么 `time` 是相对偏移而不是绝对秒：** float32 在 Unix 时间量级（1.7e9）上
+的量化步长是 **128 秒**，存绝对时间会让一条扫描线 300 个点（总跨度仅约 2.3 ms）
+全部塌成同一个值，逐点时间与去畸变一起失效且不报任何错——这是实测确认过的。
+改成相对偏移后取值落在 0..0.2 s，量化步长约 15 ns，相对 7.7 µs 的点间步长有约
+500 倍余量。需要绝对时刻时算 `header.stamp + time` 即可（PCL / Velodyne /
+Ouster / Livox 的通行约定）。
 
 ## 上手第一步：先确认包长
 
@@ -262,7 +268,7 @@ RELIABLE 与 BEST_EFFORT 不兼容，表现为「官方节点明明在发，v3 �
 | 项目 | 状态 |
 |---|---|
 | CRC32 算法 | 已对标准测试向量 `123456789` 校验（0xCBF43926） |
-| 报文定界、重同步、CRC 篡改、帧尾篡改、长度越界、重复/乱序序号 | 离线自检 135 项断言全过 |
+| 报文定界、重同步、CRC 篡改、帧尾篡改、长度越界、重复/乱序序号 | 离线自检 151 项断言全过 |
 | `serial_receiver` + 解析器（串口路径） | PTY 主从对虚拟串口，64 项断言全过（Linux；macOS 本机 63 项，无 `B2000000` 常量跳过 2 Mbps 断言）：整帧直达、跨写拆包、垃圾与伪帧头重同步、无数据契约、一次多帧、IMU 帧、设备不存在/非终端/坏波特率/未打开即读；本机（macOS）实测通过，CI 双编译器 × ASan 复跑 |
 | 串口 2 Mbps 满码率链路 | 压力自检 14 项断言全过：60 秒灌入 126,636 帧 = 解出 126,636 帧，`bad_crc 0 · bad_tail 0 · seq_gaps 0 · duplicates 0`，缓冲峰值 2,064 B，RSS 峰值 1.7 MB；CI 双编译器 × ASan 复跑 |
 | 点云几何换算 | 在退化标定下与解析解逐点比对（仰角 30° 时 z 应为 0.5） |
