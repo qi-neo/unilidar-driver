@@ -53,14 +53,16 @@
   （`serial` 默认 / `udp` 备选）与 `serial_device`、`serial_baud`；诊断日志
   与启动告警按传输层分别给出排障建议（串口路径查设备枚举 / `dialout` /
   波特率 / 线序共地，UDP 路径查 IP 端口与 `SO_RCVBUF`）。
-- **`serial_receiver_selftest`：63 项串口自检。** 用 PTY 主从对
+- **`serial_receiver_selftest`：64 项串口自检（Linux；macOS 本机 63 项）。** 用 PTY 主从对
   （`posix_openpt`/`grantpt`/`unlockpt`/`ptsname`）造虚拟串口，测试进程写
   主端、`SerialReceiver` 读从端，走与 `/dev/ttyUSB0` 完全相同的 termios
   代码路径，不需要真雷达也不需要真串口。覆盖：波特率支持表、打开失败
   路径（设备不存在 / 非终端 / 坏波特率 / 未打开即读）、整帧直达、跨写
   拆包、垃圾与伪帧头重同步、无数据契约、一次写入多帧、IMU 帧。CI 的
   `core` job 增加该自检（双编译器 × ASan 共 4 组合），`ros` job 增加
-  容器内运行与非法 `transport` 的参数校验断言。
+  容器内运行与非法 `transport` 的参数校验断言。数字按 CI 平台（Linux）
+  计：波特率表里的 2 Mbps 断言依赖 `B2000000`，它是 Linux 扩展常量，
+  macOS 的 termios 没有、跳过该项，故本机跑出来是 63 项。
 - **CI 增加 ROS 节点编译。** 新增 `ros` job：在官方 `ros:humble-ros-base`
   容器里安装 `python3-colcon-common-extensions` 与 `rosdep`，
   `rosdep install --from-paths src --ignore-src -r -y` 后

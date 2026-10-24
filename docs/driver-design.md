@@ -294,10 +294,12 @@ src/unilidar_driver/
 │   ├── protocol.hpp        帧结构（pack 1）+ CRC32
 │   ├── packet_parser.hpp   字节流 → 整包，支持重同步
 │   ├── frame_decoder.hpp   整包 → 点云 / IMU
+│   ├── serial_receiver.hpp POSIX termios 串口收包（L1 实物默认路径）
 │   └── udp_receiver.hpp    POSIX UDP 收包
 ├── src/                    以上实现 + unilidar_driver_node.cpp（唯一碰 ROS 的文件）
 ├── examples/
 │   ├── decoder_selftest.cpp  135 项断言的离线自检
+│   ├── serial_receiver_selftest.cpp 串口接收自检（PTY 虚拟串口），64 项断言
 │   └── udp_probe.cpp         实测定界探针
 ├── launch/ config/
 └── README.md
