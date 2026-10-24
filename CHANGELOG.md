@@ -12,6 +12,17 @@
 
 ### 修复
 
+- **`packet_parser` 坏帧后丢整帧。** `pull()` 的扫描游标 `pos` 原在 for 循环
+  外声明，`bad_size` / `bad_tail` / `bad_crc` 三个分支在 `erase(pos + 1)`
+  丢弃坏字节后直接 `continue`，没有把 `pos` 重置为 0（只有 `duplicate`
+  分支重置过）。下一轮 `seek_header` 从**旧位置**开始扫描，而缓冲区内容已
+  因 erase 整体前移——扫描起点落在真帧头之前，会把真正的帧头当普通字节
+  跳过，表现为**每次遇到坏帧就再丢一整帧**。触发条件正是真实链路最常见的
+  形态：一帧好帧前面混着噪声字节。压力自检用「16 B 垃圾 + 12 B 伪帧头 +
+  好帧」的组合最先抓到该 bug（此前 135 项报文自检与 64 项串口自检都没覆盖
+  到：它们的坏帧用例都是单发坏帧，坏帧后面**不接**好帧）。修复为每轮从 0
+  开扫，并删除 duplicate 分支里冗余的重置。回归：修复后 135 + 64 + 14 项
+  全绿，四种注入模式（坏帧长度 / 坏帧尾 / 坏 CRC / 坏帧后接好帧）逐一验过。
 - **CRC32 覆盖范围错误。** 原实现按 `FrameTail.crc32` 的注释
   （"crc check of head and data"）把 12 字节帧头也算进 CRC，算出
   `crc32(frame, packet_size-12)`。官方实现的真实范围是**只有数据段**
@@ -63,6 +74,18 @@
   容器内运行与非法 `transport` 的参数校验断言。数字按 CI 平台（Linux）
   计：波特率表里的 2 Mbps 断言依赖 `B2000000`，它是 Linux 扩展常量，
   macOS 的 termios 没有、跳过该项，故本机跑出来是 63 项。
+- **`serial_stress_selftest`：14 项串口压力自检。** PTY 主端按 2 Mbps 向
+  `SerialReceiver` 灌入合成报文，掺三种干扰：整秒边界注入 16 B 垃圾 +
+  12 B 伪帧头（坏帧后紧跟好帧，专打坏帧恢复路径）、每 2 秒一次 100 ms
+  读暂停（制造瞬态背压）、帧必然跨写（PTY 队列远小于一帧）。写端按
+  `budget = rate × elapsed` 节流，只提前不落后。断言覆盖：无读写错误、
+  读出字节 == 写入 + 注入、灌入帧数 == 解出帧数、点云/IMU 分类一致、
+  `bad_crc`/`bad_tail`/`seq_gaps`/`duplicates` 全 0、`bad_size` == 注入的
+  伪帧头数、重同步字节 >= 注入垃圾量、结束时 `buffered() == 0`、
+  缓冲峰值有界、实际速率 >= 目标 80%、RSS < 64 MB。CI 的 `core` job 与
+  `ros` job 均以 `--seconds 3` 运行；本机 60 秒满量版实测：灌入 126,636
+  帧全部解出（点云 113,972 / IMU 12,664），实际速率 2.00 Mbps，缓冲峰值
+  2,064 B，RSS 峰值 1.7 MB。至此「CH340 需实测」缩小到只剩物理层误码率。
 - **CI 增加 ROS 节点编译。** 新增 `ros` job：在官方 `ros:humble-ros-base`
   容器里安装 `python3-colcon-common-extensions` 与 `rosdep`，
   `rosdep install --from-paths src --ignore-src -r -y` 后
@@ -110,6 +133,13 @@
 
 ### 修改
 
+- **测试基建抽取为 `selftest_fixture.hpp`。** `serial_receiver_selftest.cpp`
+  里的 PTY 主从对、帧构造、边写边读（`pushAndPump`）、断言计数搬进
+  `examples/selftest_fixture.hpp`，与 `serial_stress_selftest.cpp` 共用。
+  重构后接收自检断言逐条核对，一条不差（Linux 64 / macOS 63 不变）。
+  抽取时发现并利用了 PTY 的一个平台差异：macOS 从端输入队列约 512 B、
+  Linux 约 4 KB，都远小于一帧点云 1,044 B——主端必须非阻塞边写边读，
+  阻塞写遇队列满会死锁（压力自检开发中实际踩到过）。
 - `UdpReceiver::open()` 签名增加 `recv_buf_bytes`，`udp_probe` 与节点同步更新；
   `udp_probe` 汇总新增"重复包/乱序包"两项。
 - 点云发布路径改用带 time/ring 的解码重载：`PointCloud2` 字段 6 个、
@@ -129,6 +159,11 @@
 - 真实 UDP 回环 PASSED：7 包收到、6 帧解出、1 帧 CRC 损坏被拒、
   重复包/乱序包均为 0；探针在无数据时返回非 0。
 - `python3 tools/check_deps.py` 通过（1 个包依赖声明一致）。
+- 压力自检本机 60 秒满量版：灌入 126,636 帧 = 解出 126,636 帧（点云
+  113,972 / IMU 12,664），实际速率 2.00 Mbps，`bad_crc 0 · bad_tail 0 ·
+  seq_gaps 0 · duplicates 0`，`bad_size 59`（= 59 次伪帧头注入），
+  重同步 1,652 B（= 59 × 28 B），缓冲峰值 2,064 B，RSS 峰值 1.7 MB；
+  14 项断言全过。g++ / clang++ `-Werror` 与 ASan+UBSan 三种构建形态均过。
 - ASan/UBSan（`-fsanitize=address,undefined`）下自检与回环测试均无报告。
 - 变异检验：把解析器换回旧实现后，CRC 批次新增断言从 69/69 变成 36 项失败，
   证明新增断言确实能抓住该 bug。
@@ -150,6 +185,10 @@
   接真机第一件事应是用 `udp_probe --hex` 核对帧头与包长，再统一命名。
 - 收包缓冲的实际收益：默认 8 MiB 是按码率与常见调度延迟估算的，
   真机上应该观察 `序号缺口` 是否归零后再决定是否继续调大。
+- **CH340 串口物理层误码率。** 协议层已由压力自检全覆盖（2 Mbps 灌入、
+  垃圾注入、读背压均零丢失），实物接上后只剩 USB 转串口模块与线材的物理
+  误码待实测：诊断日志里 `CRC` 计数持续为 0 即通过；若持续增长，先换
+  线/换模块/缩短线长，再怀疑固件 CRC 规则（后者已有对应的排障流程）。
 
 ## [1.0.1] - 2026-10-14
 

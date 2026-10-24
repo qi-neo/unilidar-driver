@@ -75,6 +75,27 @@ jobs:
             -o serial_receiver_selftest
           ASAN_OPTIONS=detect_leaks=1 ./serial_receiver_selftest
 
+      # 压力自检把「CH340 需实测」缩小到只剩物理层误码率：PTY 主端按 2 Mbps
+      # 灌 60 秒合成报文（本 CI 取 3 秒），同时掺垃圾字节与伪帧头、周期性读
+      # 暂停制造瞬态背压，核验零丢失、零误判、缓冲有界、内存平稳。
+      # 这条同时守护 packet_parser 的坏帧恢复路径——该路径的 pos 重置 bug
+      # 正是本测试最先发现的（每次注入后丢一整帧）。
+      - name: 编译并运行 14 项串口压力自检（2 Mbps 灌入 3 s）
+        run: |
+          set -e
+          EXTRA=""
+          if [ "${{ matrix.sanitizer }}" = "asan" ]; then
+            EXTRA="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+          fi
+          ${{ matrix.cxx }} -std=c++17 -Wall -Wextra -Wpedantic -Werror -O1 $EXTRA \
+            -I src/unilidar_driver/include \
+            src/unilidar_driver/examples/serial_stress_selftest.cpp \
+            src/unilidar_driver/src/protocol.cpp \
+            src/unilidar_driver/src/packet_parser.cpp \
+            src/unilidar_driver/src/serial_receiver.cpp \
+            -o serial_stress_selftest
+          ASAN_OPTIONS=detect_leaks=1 ./serial_stress_selftest --seconds 3 --quiet
+
       - name: 编译探针并确认可用
         run: |
           set -e
@@ -158,11 +179,14 @@ jobs:
           test -x "$BIN/decoder_selftest"
           test -x "$BIN/udp_probe"
           test -x "$BIN/serial_receiver_selftest"
+          test -x "$BIN/serial_stress_selftest"
           # 装出来的自检与探针也能跑，确认没有链接问题
           "$BIN/decoder_selftest"
           "$BIN/udp_probe" --help > /dev/null
           # 串口自检用 PTY 虚拟串口，容器里同样可跑
           "$BIN/serial_receiver_selftest"
+          # 压力自检取 3 秒，容器里灌入速率同样跑得满 2 Mbps
+          "$BIN/serial_stress_selftest" --seconds 3 --quiet
 
           # 参数校验要 FATAL 后以非 0 退出，而不是静默回退：用越界端口启动节点，
           # 期望进程失败且日志里出现「参数非法」。这条同时验证了节点能真正跑起来。
