@@ -314,7 +314,7 @@ EACCES 提示加入 dialout 组、设备拔出、fd 失效，64 → **81**；`re
 错误分支用「从外部关掉驱动持有的 fd」模拟句柄变野来覆盖——这是给
 `SerialReceiver` 加 `fd()` 访问器的原因，select/poll 型调用方也用得上；
 剩余未覆盖行的不可构造原因逐条写在自检头注释里）；UDP 新建 38 项自检
-（打开契约与 `SO_RCVBUF`/`SO_RCVTIMEO` 回读、非法 IP、端口重复 bind、
+（打开契约与 `SO_RCVBUF`/`SO_RCVTIMEO` 回读、非法 IP、bind 非本机地址、
 未打开即收、超时返回 0 且不污染 err、close 幂等，67.14% → **92.86%**）。
 UDP 自检与 `tests/udp_loopback_test.sh` 的分工也写进了头注释：脚本是
 集成测试只走 happy path，自检是单元测试覆盖每条分支含失败路径。
