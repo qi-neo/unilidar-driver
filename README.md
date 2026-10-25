@@ -26,7 +26,7 @@ ROS2 驱动：默认经 CH340 USB 串口（`/dev/ttyUSB0`，2 Mbps）收报文�
 - 协议解析核心**不依赖 ROS**，可在任意有 clang 的机器上编译并跑断言
 - 报文定界只用「帧尾标识 + CRC32」，不硬编码整包长度
 - 配套 `udp_probe` 实测定界探针，5 分钟确认真实包长与 CRC
-- 308 项断言的离线自检（报文解析 202 + 串口接收 64 + 压力灌入 14 + 节点主循环 28），做过变异测试
+- 345 项断言的离线自检（报文解析 202 + 串口接收 64 + 压力灌入 14 + 节点主循环 65），做过变异测试
 - PointCloud2 带逐点 `time`（相对 `header.stamp` 的偏移秒数）与 `ring`（整圈 1 基线号），可自行做运动去畸变
 - 按报文类型分别跟踪序号：重复包直接丢弃并计数，乱序与丢包分开统计
 - QoS 与常见下游对齐（`SensorDataQoS`），避免"明明在发却收不到"
@@ -180,7 +180,7 @@ unilidar-driver/
 │   │   ├── decoder_selftest.cpp   202 项断言的离线自检
 │   │   ├── serial_receiver_selftest.cpp 串口接收自检（PTY 虚拟串口），64 项断言
 │   │   ├── serial_stress_selftest.cpp 串口压力自检（PTY 2 Mbps 灌入），14 项断言
-│   │   ├── node_loop_selftest.cpp 节点主循环自检（实时性与背压），28 项断言
+│   │   ├── node_loop_selftest.cpp 节点主循环自检（实时性与背压），65 项断言
 │   │   ├── selftest_fixture.hpp   三个串口自检共用的测试基建（PTY、帧构造、边写边读）
 │   │   └── udp_probe.cpp          实测定界探针
 │   ├── launch/ config/
@@ -201,7 +201,7 @@ unilidar-driver/
 | Job | 内容 |
 |---|---|
 | `deps` | 依赖声明一致性：核对 `CMakeLists.txt` 的 `find_package` 与 `package.xml` 的依赖声明，漏声明即失败。见 `tools/check_deps.py` |
-| `core` | clang++ 与 g++ 两种编译器 × 普通 / ASan+UBSan 两种构建，共 4 个组合。`-Werror` 强制零警告，跑 202 项报文自检、64 项串口接收自检（PTY 虚拟串口）与 14 项串口压力自检（PTY 2 Mbps 灌入 3 s，掺垃圾与伪帧头、周期性读暂停）、\n28 项节点主循环自检（吞吐 / 单轮耗时分布 / 定界缓冲深度 / 超载丢弃与恢复），另编译探针确认可用 |
+| `core` | clang++ 与 g++ 两种编译器 × 普通 / ASan+UBSan 两种构建，共 4 个组合。`-Werror` 强制零警告，跑 202 项报文自检、64 项串口接收自检（PTY 虚拟串口）与 14 项串口压力自检（PTY 2 Mbps 灌入 3 s，掺垃圾与伪帧头、周期性读暂停）、\n65 项节点主循环自检（吞吐 / 单轮耗时分布 / 定界缓冲深度 / 超载丢弃与恢复 / 读错误恢复 / 深积压读满上限 / 空云线与半圈丢弃 / 统计复位语义 / 重复线端到端），另编译探针确认可用 |
 | `udp-loopback` | 真实 UDP 回环集成测试，再叠 ASan/UBSan 跑一遍；并验证探针在收不到包时返回非 0 |
 | `ros` | 在官方 `ros:humble-ros-base` 容器里 `rosdep install --from-paths src --ignore-src -r -y` 后 `colcon build --packages-select unilidar_driver`，并确认节点/自检/探针产物可执行；再用越界 `local_port` 启动节点，确认参数校验会 FATAL 并以非 0 退出 |
 
