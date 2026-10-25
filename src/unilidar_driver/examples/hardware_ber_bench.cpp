@@ -10,7 +10,7 @@
 // 一键出的那份报告。
 //
 // 三种用法（都不依赖 ROS）：
-//   1) 真机：  hardware_ber_bench --device /dev/ttyUSB0 --baud 2000000 \
+//   1) 真机：  hardware_ber_bench --device /dev/ttyUSB0 --baud 2000000
 //                --duration 7200 --report ber_report.md --csv ber_report.csv
 //   2) 回放：  hardware_ber_bench --input capture.bin
 //              （capture.bin 由 `cat /dev/ttyUSB0 > capture.bin` 之类录得）
