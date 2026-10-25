@@ -140,6 +140,42 @@ jobs:
             -o node_loop_selftest
           ASAN_OPTIONS=detect_leaks=1 ./node_loop_selftest --seconds 2 --quiet
 
+      # B1 真机误码率/长稳 bench 的离线自检：不碰硬件，用合成流验证解析链路
+      # 计数与报告生成路径。接真雷达时用 --device /dev/ttyUSB0 --duration 7200 出物理层报告。
+      - name: 编译并运行 B1 误码率 bench 离线自检（合成流）
+        run: |
+          set -e
+          EXTRA=""
+          if [ "${{ matrix.sanitizer }}" = "asan" ]; then
+            EXTRA="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+          fi
+          ${{ matrix.cxx }} -std=c++17 -Wall -Wextra -Wpedantic -Werror -O1 $EXTRA \
+            -I src/unilidar_driver/include -I src/unilidar_driver/examples \
+            src/unilidar_driver/examples/hardware_ber_bench.cpp \
+            src/unilidar_driver/src/protocol.cpp \
+            src/unilidar_driver/src/packet_parser.cpp \
+            src/unilidar_driver/src/frame_decoder.cpp \
+            src/unilidar_driver/src/serial_receiver.cpp \
+            -o hardware_ber_bench
+          ASAN_OPTIONS=detect_leaks=1 ./hardware_ber_bench --selftest --quiet
+
+      # B2 四元数一键判定：判定逻辑的离线自检（ROS-free）。ROS 节点本身在 ros job 编译。
+      - name: 编译并运行 B2 四元数判定自检（65 项）
+        run: |
+          set -e
+          EXTRA=""
+          if [ "${{ matrix.sanitizer }}" = "asan" ]; then
+            EXTRA="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+          fi
+          ${{ matrix.cxx }} -std=c++17 -Wall -Wextra -Wpedantic -Werror -O1 $EXTRA \
+            -I src/unilidar_driver/include \
+            src/unilidar_driver/examples/quat_check_selftest.cpp \
+            src/unilidar_driver/src/protocol.cpp \
+            src/unilidar_driver/src/packet_parser.cpp \
+            src/unilidar_driver/src/frame_decoder.cpp \
+            -o quat_check_selftest
+          ASAN_OPTIONS=detect_leaks=1 ./quat_check_selftest
+
       - name: 编译探针并确认可用
         run: |
           set -e
@@ -225,6 +261,8 @@ jobs:
           test -x "$BIN/serial_receiver_selftest"
           test -x "$BIN/serial_stress_selftest"
           test -x "$BIN/node_loop_selftest"
+          test -x "$BIN/quat_check_selftest"
+          test -x "$BIN/quat_check"
           # 装出来的自检与探针也能跑，确认没有链接问题
           "$BIN/decoder_selftest"
           "$BIN/udp_probe" --help > /dev/null
@@ -234,6 +272,8 @@ jobs:
           "$BIN/serial_stress_selftest" --seconds 3 --quiet
           # 节点主循环自检同样在容器里跑（真机跑的就是这份 DriverLoop）
           "$BIN/node_loop_selftest" --seconds 2 --quiet
+          # B2 四元数判定自检（ROS-free 判定逻辑，ROS 节点已一并编译）
+          "$BIN/quat_check_selftest"
 
           # 参数校验要 FATAL 后以非 0 退出，而不是静默回退：用越界端口启动节点，
           # 期望进程失败且日志里出现「参数非法」。这条同时验证了节点能真正跑起来。

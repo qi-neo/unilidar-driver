@@ -53,16 +53,34 @@ target_link_libraries(serial_stress_selftest unilidar_driver_core)
 add_executable(node_loop_selftest examples/node_loop_selftest.cpp)
 target_link_libraries(node_loop_selftest unilidar_driver_core)
 
+# 真机 CH340 @ 2 Mbps 误码率/长稳 bench：接真雷达时一键出物理层报告；
+# --selftest 模式不碰硬件，用合成流验证解析链路计数与报告生成（CI 离线回归）
+add_executable(hardware_ber_bench examples/hardware_ber_bench.cpp)
+target_link_libraries(hardware_ber_bench unilidar_driver_core)
+
 # UDP 接收自检：收发两端都建在本机回环上，覆盖 UdpReceiver 的每条分支
 # （打开契约、IP 配错、bind 非本机地址、未打开即收、src_ip 回显、超时契约）。
 # 端口默认 46311，可用 UDP_SELFTEST_PORT 覆盖
 add_executable(udp_receiver_selftest examples/udp_receiver_selftest.cpp)
 target_link_libraries(udp_receiver_selftest unilidar_driver_core)
 
+# 四元数一键判定：订阅 /unilidar/imu，60 秒窗口统计判定 xyzw/wxyz 约定
+# （B2 项）。quat_check_selftest 是 ROS-free 的判定逻辑离线自检；
+# quat_check 才是真正的 ROS 节点薄壳。
+add_executable(quat_check_selftest examples/quat_check_selftest.cpp)
+target_link_libraries(quat_check_selftest unilidar_driver_core)
+
 # ROS 节点：只做参数、收包与发布的接线
 add_executable(unilidar_driver_node src/unilidar_driver_node.cpp)
 target_link_libraries(unilidar_driver_node unilidar_driver_core)
 ament_target_dependencies(unilidar_driver_node
+  rclcpp sensor_msgs geometry_msgs tf2 tf2_ros
+)
+
+# 四元数判定节点（B2 项）：只订阅 /unilidar/imu 并实时打印判定结果
+add_executable(quat_check examples/quat_check.cpp)
+target_link_libraries(quat_check unilidar_driver_core)
+ament_target_dependencies(quat_check
   rclcpp sensor_msgs geometry_msgs tf2 tf2_ros
 )
 
@@ -74,6 +92,9 @@ install(TARGETS
   serial_stress_selftest
   node_loop_selftest
   udp_receiver_selftest
+  hardware_ber_bench
+  quat_check_selftest
+  quat_check
   DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY launch config
