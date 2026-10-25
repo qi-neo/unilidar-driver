@@ -57,7 +57,7 @@ jobs:
           # 开了 ASan 时顺便查泄漏；没开时这个变量被忽略
           ASAN_OPTIONS=detect_leaks=1 ./decoder_selftest
 
-      - name: 编译并运行 64 项串口接收自检（PTY 虚拟串口；macOS 无 B2000000 常量为 63 项）
+      - name: 编译并运行 78 项串口接收自检（PTY 虚拟串口；macOS 无 B2000000 常量为 77 项）
         run: |
           set -e
           EXTRA=""
@@ -74,6 +74,28 @@ jobs:
             src/unilidar_driver/src/serial_receiver.cpp \
             -o serial_receiver_selftest
           ASAN_OPTIONS=detect_leaks=1 ./serial_receiver_selftest
+
+      # UdpReceiver 与 SerialReceiver 同为传输层：udp-loopback job 的
+      # 回环脚本只覆盖 happy path（能打开、能收到），socket() 失败、
+      # 非法 IP、重复 bind、未打开即收、SO_RCVBUF/SO_RCVTIMEO 回读、
+      # close 幂等等失败与边界路径全部在这里补上，与 udp-loopback 互为补充。
+      # 端口默认 46311（与 udp-loopback job 的 46201 不冲突），
+      # 可用 UDP_SELFTEST_PORT 覆盖。
+      - name: 编译并运行 38 项 UDP 接收自检（回环 socket）
+        run: |
+          set -e
+          EXTRA=""
+          if [ "${{ matrix.sanitizer }}" = "asan" ]; then
+            EXTRA="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+          fi
+          ${{ matrix.cxx }} -std=c++17 -Wall -Wextra -Wpedantic -Werror -O1 $EXTRA \
+            -I src/unilidar_driver/include \
+            src/unilidar_driver/examples/udp_receiver_selftest.cpp \
+            src/unilidar_driver/src/protocol.cpp \
+            src/unilidar_driver/src/packet_parser.cpp \
+            src/unilidar_driver/src/udp_receiver.cpp \
+            -o udp_receiver_selftest
+          ASAN_OPTIONS=detect_leaks=1 ./udp_receiver_selftest
 
       # 压力自检把「CH340 需实测」缩小到只剩物理层误码率：PTY 主端按 2 Mbps
       # 灌 60 秒合成报文（本 CI 取 3 秒），同时掺垃圾字节与伪帧头、周期性读
