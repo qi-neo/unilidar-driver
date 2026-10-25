@@ -78,6 +78,62 @@
 峰值 1022 B、p99 0.078 ms（与 2 s 短跑一致，无退化）、RSS 3.6 MB。
 双编译器 × 普通/ASan+UBSan 四组合 65 项全过。
 
+### 测试（C2 传输层覆盖率补齐）
+
+C1 补完解析层（`packet_parser`/`frame_decoder` 行覆盖 100%）、A2 补完主循环
+之后，`gcov` 查下来驱动核心里只剩两个传输层文件没过覆盖率分析：
+`serial_receiver.cpp` 81.69%、`udp_receiver.cpp` 67.14%。未覆盖行逐条归因后
+分三类：用户态构造不出的失败（`tcgetattr`/`tcsetattr` 失败）、要耗尽 fd 才
+够得着的硬错误（`socket()`/`recvfrom()`）、以及**平台语义分化**——驱动自设
+`VMIN=0/VTIME=0`，PTY 无数据时 read 返回 0 而非 EAGAIN，`readSome` 的 EAGAIN
+分支两平台均不可达（防御代码，如实标注）；而**关掉 PTY 主端后读从端，macOS
+返回 0（EOF 语义）、Linux 返回 -1/EIO**——真机 USB 串口拔出两平台都是错误
+返回，EOF 是 PTY 独有的仿真语义，这类断言必须 `#ifdef __APPLE__` 分平台写
+并把原因写进注释，否则换平台 CI 就红。
+
+- **串口接收自检 64 → 78**（macOS 63 → 77）。新增 `[9] 打开契约与设备拔出`
+  14 项：空设备名直接失败且 err 提示「空」；EACCES（`chmod 0` 构造）提示
+  「Permission denied（把当前用户加入 dialout 组后重新登录）」，root 下自动
+  跳过（权限位被绕过）；设备拔出分平台断言（macOS n==0/err 空；Linux
+  n==-1/err 含「失败」，CI 的 Linux runner 覆盖 176-177 行），拔出后
+  `isOpen` 保持 true、`device()` 不变，close 后句柄归零、再读返回 -1。
+- **UDP 接收自检新建 38 项**（第五套离线自检）。此前 `udp_receiver.cpp` 只有
+  `udp-loopback` job 的真实回环脚本覆盖，而脚本只走 happy path；新建自检补上
+  全部分支：打开契约与 `SO_RCVBUF`/`SO_RCVTIMEO` 回读（打印的是 `getsockopt`
+  生效值不是请求值）、非法 IP（`300.1.2.3`/`1.2.3`）早退、同端口重复 bind
+  报「绑定」失败、未打开即收报「未打开」、超时返回 0 且不污染 err、close
+  幂等（`recvBufBytes()` 归零、再收仍 -1）。分工写进头注释：脚本=集成测试
+  只走 happy path，自检=单元测试覆盖每条分支含失败路径。
+
+| 文件 | 覆盖前 | 覆盖后 | 剩余未覆盖行归因 |
+|---|---|---|---|
+| `serial_receiver.cpp` | 81.69% | **84.51%** | `tcgetattr`/`tcsetattr` 失败分支（用户态不可构造）、EAGAIN 分支（VMIN=0/VTIME=0 下不可达，防御代码） |
+| `udp_receiver.cpp` | 67.14% | **92.86%** | `socket()`/`recvfrom()` 硬错误分支（需耗尽 fd 构造） |
+
+**变异验证（九个变异体全部被新断言抓住，且只抓目标断言、不误伤）：**
+
+| 变异体（改坏什么） | 被抓断言数 |
+|---|---|
+| S1 `open()` 删掉空设备名校验 | 1 |
+| S2 `open()` 删掉 EACCES 的 dialout 提示 | 1 |
+| S3 `readSome()` 删掉「未打开」的 err 填充 | 1 |
+| U1 `open()` 删掉非法 IP 的早退分支 | 5 |
+| U2 `open()` bind 失败仍返回 true | 1 |
+| U3 bind 失败提示里的「绑定」改名 | 2 |
+| U4 `receive()` 删掉 src_ip 回填 | 1 |
+| U5 `receive()` 超时改为返回 -1 | 1 |
+| U6 `close()` 不清 `recv_buf_bytes_` | 1 |
+
+**60 s 长时程复跑**（2 Mbps 灌入 120 MB）：126,637 帧全部解出零丢失、
+`readSome` 调用 136,026 次、缓冲峰值 2,064 B、RSS 峰值 1.7 MB、
+`bad_size 59`（= 注入的伪帧头数，全部按预期拒斥）。
+双编译器 × 普通/ASan+UBSan 四组合全过（UDP 自检连跑 5 次零抖动——端口竞态
+是这类测试的常见假红灯，默认端口 46311 与 udp-loopback job 的 46201 不冲突，
+另可用 `UDP_SELFTEST_PORT` 覆盖）。CI 新增「编译并运行 38 项 UDP 接收自检」
+步骤，串口步骤名随 64 → 78 更新。
+
+独立仓总数 345 → **397**（报文 202 + 串口 78 + UDP 38 + 压力 14 + 主循环 65）。
+
 ### 修复（本轮新增）
 
 - **逐点 `time` 用 float32 存绝对 Unix 时间，运动去畸变完全失效（P0，静默）。**
