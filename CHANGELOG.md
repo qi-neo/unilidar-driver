@@ -84,19 +84,18 @@ C1 补完解析层（`packet_parser`/`frame_decoder` 行覆盖 100%）、A2 补�
 之后，`gcov` 查下来驱动核心里只剩两个传输层文件没过覆盖率分析：
 `serial_receiver.cpp` 81.69%、`udp_receiver.cpp` 67.14%。未覆盖行逐条归因后
 分三类：用户态构造不出的失败（`tcgetattr`/`tcsetattr` 失败）、要耗尽 fd 才
-够得着的硬错误（`socket()`/`recvfrom()`）、以及**平台语义分化**——驱动自设
-`VMIN=0/VTIME=0`，PTY 无数据时 read 返回 0 而非 EAGAIN，`readSome` 的 EAGAIN
-分支两平台均不可达（防御代码，如实标注）；而**关掉 PTY 主端后读从端，macOS
-返回 0（EOF 语义）、Linux 返回 -1/EIO**——真机 USB 串口拔出两平台都是错误
-返回，EOF 是 PTY 独有的仿真语义，这类断言必须 `#ifdef __APPLE__` 分平台写
-并把原因写进注释，否则换平台 CI 就红。
+够得着的硬错误（`socket()`/`recvfrom()`）、以及**平台语义**——PTY 无数据时
+read 返回 0 而非 EAGAIN（`VMIN=0/VTIME=0` 下的固有限定，`readSome` 的 EAGAIN
+分支是防御代码）；设备拔出的语义则被首轮 CI 实测推翻，见下。
 
-- **串口接收自检 64 → 78**（macOS 63 → 77）。新增 `[9] 打开契约与设备拔出`
-  14 项：空设备名直接失败且 err 提示「空」；EACCES（`chmod 0` 构造）提示
+- **串口接收自检 64 → 81**（macOS 63 → 80）。新增 `[9] 打开契约与设备拔出`
+  17 项：空设备名直接失败且 err 提示「空」；EACCES（`chmod 0` 构造）提示
   「Permission denied（把当前用户加入 dialout 组后重新登录）」，root 下自动
-  跳过（权限位被绕过）；设备拔出分平台断言（macOS n==0/err 空；Linux
-  n==-1/err 含「失败」，CI 的 Linux runner 覆盖 176-177 行），拔出后
-  `isOpen` 保持 true、`device()` 不变，close 后句柄归零、再读返回 -1。
+  跳过（权限位被绕过）；设备拔出断言 EOF 语义；fd 失效后 `readSome` 走错误
+  分支（返回 -1、err 点名设备与「失败」）——错误分支覆盖靠「从外部关掉驱动
+  持有的 fd」模拟句柄变野，为此 `SerialReceiver` 新增 `fd()` 访问器（select/
+  poll 型调用方同样用得上，非测试后门）；拔出后 `isOpen` 保持 true、
+  `device()` 不变，close 后句柄归零、再读返回 -1。
 - **UDP 接收自检新建 38 项**（第五套离线自检）。此前 `udp_receiver.cpp` 只有
   `udp-loopback` job 的真实回环脚本覆盖，而脚本只走 happy path；新建自检补上
   全部分支：打开契约与 `SO_RCVBUF`/`SO_RCVTIMEO` 回读（打印的是 `getsockopt`
@@ -107,10 +106,20 @@ C1 补完解析层（`packet_parser`/`frame_decoder` 行覆盖 100%）、A2 补�
 
 | 文件 | 覆盖前 | 覆盖后 | 剩余未覆盖行归因 |
 |---|---|---|---|
-| `serial_receiver.cpp` | 81.69% | **84.51%** | `tcgetattr`/`tcsetattr` 失败分支（用户态不可构造）、EAGAIN 分支（VMIN=0/VTIME=0 下不可达，防御代码） |
+| `serial_receiver.cpp` | 81.69% | **88.73%**（macOS 本机） | `tcgetattr`/`tcsetattr` 失败分支（用户态不可构造）；EAGAIN 分支（`VMIN=0/VTIME=0` 下 read 无数据返回 0，防御代码） |
 | `udp_receiver.cpp` | 67.14% | **92.86%** | `socket()`/`recvfrom()` 硬错误分支（需耗尽 fd 构造） |
 
-**变异验证（九个变异体全部被新断言抓住，且只抓目标断言、不误伤）：**
+**首轮 CI 翻车与修正（平台语义教训）**：设备拔出的 PTY 语义原按「Linux
+主端关闭后从端 read 返回 -1/EIO」断言并写进文档，首轮 CI 在 Ubuntu 24.04
+runner（内核 6.8）上两平台实测都是 **EOF（返回 0、err 为空）**——4 个核心库
+组合与 ROS job 当场挂掉。修正：删掉 `#ifdef __APPLE__` 分平台断言，统一按
+EOF 断言（readSome 无法区分 EOF 与暂时无数据，都是 0，POSIX read 在 `VMIN=0`
+下的固有限定；真机 USB 串口拔出两平台都是错误返回，EOF 是 PTY 独有的仿真
+语义），并把踩坑记录写进自检注释、设计文档第 10 条与本条目。错误分支的
+覆盖改用 fd 失效场景补上。**平台语义不能凭文献/记忆断言，要以目标 CI 环境
+的实测为准；实测与预期不符时，改的是断言和文档，不是事实。**
+
+**变异验证（十个变异体全部被新断言抓住，且只抓目标断言、不误伤）：**
 
 | 变异体（改坏什么） | 被抓断言数 |
 |---|---|
@@ -123,6 +132,7 @@ C1 补完解析层（`packet_parser`/`frame_decoder` 行覆盖 100%）、A2 补�
 | U4 `receive()` 删掉 src_ip 回填 | 1 |
 | U5 `receive()` 超时改为返回 -1 | 1 |
 | U6 `close()` 不清 `recv_buf_bytes_` | 1 |
+| U7 `readSome()` 错误分支删掉 err 填充 | 1（fd 失效场景抓住） |
 
 **60 s 长时程复跑**（2 Mbps 灌入 120 MB）：126,637 帧全部解出零丢失、
 `readSome` 调用 136,026 次、缓冲峰值 2,064 B、RSS 峰值 1.7 MB、
@@ -130,9 +140,9 @@ C1 补完解析层（`packet_parser`/`frame_decoder` 行覆盖 100%）、A2 补�
 双编译器 × 普通/ASan+UBSan 四组合全过（UDP 自检连跑 5 次零抖动——端口竞态
 是这类测试的常见假红灯，默认端口 46311 与 udp-loopback job 的 46201 不冲突，
 另可用 `UDP_SELFTEST_PORT` 覆盖）。CI 新增「编译并运行 38 项 UDP 接收自检」
-步骤，串口步骤名随 64 → 78 更新。
+步骤，串口步骤名随 64 → 81 更新。
 
-独立仓总数 345 → **397**（报文 202 + 串口 78 + UDP 38 + 压力 14 + 主循环 65）。
+独立仓总数 345 → **400**（报文 202 + 串口 81 + UDP 38 + 压力 14 + 主循环 65）。
 
 ### 修复（本轮新增）
 
