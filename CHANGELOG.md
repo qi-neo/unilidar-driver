@@ -99,8 +99,9 @@ read 返回 0 而非 EAGAIN（`VMIN=0/VTIME=0` 下的固有限定，`readSome` �
 - **UDP 接收自检新建 38 项**（第五套离线自检）。此前 `udp_receiver.cpp` 只有
   `udp-loopback` job 的真实回环脚本覆盖，而脚本只走 happy path；新建自检补上
   全部分支：打开契约与 `SO_RCVBUF`/`SO_RCVTIMEO` 回读（打印的是 `getsockopt`
-  生效值不是请求值）、非法 IP（`300.1.2.3`/`1.2.3`）早退、同端口重复 bind
-  报「绑定」失败、未打开即收报「未打开」、超时返回 0 且不污染 err、close
+  生效值不是请求值）、非法 IP（`300.1.2.3`/`1.2.3`）早退、bind 非本机地址
+  （`198.51.100.7`，EADDRNOTAVAIL）报「绑定」失败且点明是哪个 IP、未打开即收
+  报「未打开」、超时返回 0 且不污染 err、close
   幂等（`recvBufBytes()` 归零、再收仍 -1）。分工写进头注释：脚本=集成测试
   只走 happy path，自检=单元测试覆盖每条分支含失败路径。
 
@@ -109,17 +110,26 @@ read 返回 0 而非 EAGAIN（`VMIN=0/VTIME=0` 下的固有限定，`readSome` �
 | `serial_receiver.cpp` | 81.69% | **88.73%**（macOS 本机） | `tcgetattr`/`tcsetattr` 失败分支（用户态不可构造）；EAGAIN 分支（`VMIN=0/VTIME=0` 下 read 无数据返回 0，防御代码） |
 | `udp_receiver.cpp` | 67.14% | **92.86%** | `socket()`/`recvfrom()` 硬错误分支（需耗尽 fd 构造） |
 
-**首轮 CI 翻车与修正（平台语义教训）**：设备拔出的 PTY 语义原按「Linux
-主端关闭后从端 read 返回 -1/EIO」断言并写进文档，首轮 CI 在 Ubuntu 24.04
-runner（内核 6.8）上两平台实测都是 **EOF（返回 0、err 为空）**——4 个核心库
-组合与 ROS job 当场挂掉。修正：删掉 `#ifdef __APPLE__` 分平台断言，统一按
-EOF 断言（readSome 无法区分 EOF 与暂时无数据，都是 0，POSIX read 在 `VMIN=0`
-下的固有限定；真机 USB 串口拔出两平台都是错误返回，EOF 是 PTY 独有的仿真
-语义），并把踩坑记录写进自检注释、设计文档第 10 条与本条目。错误分支的
-覆盖改用 fd 失效场景补上。**平台语义不能凭文献/记忆断言，要以目标 CI 环境
-的实测为准；实测与预期不符时，改的是断言和文档，不是事实。**
+**两轮 CI 翻车与修正（平台语义教训，本轮最重要的经验）**：
 
-**变异验证（十个变异体全部被新断言抓住，且只抓目标断言、不误伤）：**
+1. **设备拔出的 PTY 语义**：原按「Linux 主端关闭后从端 read 返回 -1/EIO」
+   断言并写进文档，首轮 CI 在 Ubuntu 24.04 runner（内核 6.8）上两平台实测
+   都是 **EOF（返回 0、err 为空）**——4 个核心库组合与 ROS job 当场挂掉。
+   修正：删掉 `#ifdef __APPLE__` 分平台断言，统一按 EOF 断言（readSome
+   无法区分 EOF 与暂时无数据，都是 0，POSIX read 在 `VMIN=0` 下的固有限定；
+   真机 USB 串口拔出两平台都是错误返回，EOF 是 PTY 独有的仿真语义），错误
+   分支的覆盖改用 fd 失效场景补上。
+2. **同端口二次 bind**：原按「SO_REUSEADDR 下二次 bind 报 EADDRINUSE」断言，
+   二轮 CI 在 Linux runner 上挂掉——**Linux 上两个都设了 SO_REUSEADDR 的
+   UDP socket 允许绑同一端口**（多进程负载均衡语义），macOS 才报 EADDRINUSE。
+   修正：换成 bind 非本机地址（`198.51.100.7` → EADDRNOTAVAIL）——两平台
+   行为一致，且「local_ip 填了不在这台机器上的 IP」真机上比端口被占更常见。
+
+两次翻车是同一个教训：**平台语义不能凭文献/记忆断言，要以目标 CI 环境的
+实测为准；实测与预期不符时，改的是断言和文档，不是事实。**踩坑记录已写进
+自检注释、设计文档第 10 条与本条目。
+
+**变异验证（十一个变异体全部被新断言抓住，且只抓目标断言、不误伤）：**
 
 | 变异体（改坏什么） | 被抓断言数 |
 |---|---|
@@ -133,6 +143,7 @@ EOF 断言（readSome 无法区分 EOF 与暂时无数据，都是 0，POSIX rea
 | U5 `receive()` 超时改为返回 -1 | 1 |
 | U6 `close()` 不清 `recv_buf_bytes_` | 1 |
 | U7 `readSome()` 错误分支删掉 err 填充 | 1（fd 失效场景抓住） |
+| U8 `open()` bind 失败的 err 退化成无 IP 的通用文案 | 1（非本机地址场景抓住） |
 
 **60 s 长时程复跑**（2 Mbps 灌入 120 MB）：126,637 帧全部解出零丢失、
 `readSome` 调用 136,026 次、缓冲峰值 2,064 B、RSS 峰值 1.7 MB、
