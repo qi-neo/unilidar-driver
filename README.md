@@ -26,7 +26,7 @@ ROS2 驱动：默认经 CH340 USB 串口（`/dev/ttyUSB0`，2 Mbps）收报文�
 - 协议解析核心**不依赖 ROS**，可在任意有 clang 的机器上编译并跑断言
 - 报文定界只用「帧尾标识 + CRC32」，不硬编码整包长度
 - 配套 `udp_probe` 实测定界探针，5 分钟确认真实包长与 CRC
-- 257 项断言的离线自检（报文解析 151 + 串口接收 64 + 压力灌入 14 + 节点主循环 28），做过变异测试
+- 308 项断言的离线自检（报文解析 202 + 串口接收 64 + 压力灌入 14 + 节点主循环 28），做过变异测试
 - PointCloud2 带逐点 `time`（相对 `header.stamp` 的偏移秒数）与 `ring`（整圈 1 基线号），可自行做运动去畸变
 - 按报文类型分别跟踪序号：重复包直接丢弃并计数，乱序与丢包分开统计
 - QoS 与常见下游对齐（`SensorDataQoS`），避免"明明在发却收不到"
@@ -177,7 +177,7 @@ unilidar-driver/
 │   ├── include/unilidar_driver/     协议、解析、解码、收包（不依赖 ROS）
 │   ├── src/                       实现 + unilidar_driver_node.cpp（ROS 薄节点）
 │   ├── examples/
-│   │   ├── decoder_selftest.cpp   151 项断言的离线自检
+│   │   ├── decoder_selftest.cpp   202 项断言的离线自检
 │   │   ├── serial_receiver_selftest.cpp 串口接收自检（PTY 虚拟串口），64 项断言
 │   │   ├── serial_stress_selftest.cpp 串口压力自检（PTY 2 Mbps 灌入），14 项断言
 │   │   ├── node_loop_selftest.cpp 节点主循环自检（实时性与背压），28 项断言
@@ -201,13 +201,13 @@ unilidar-driver/
 | Job | 内容 |
 |---|---|
 | `deps` | 依赖声明一致性：核对 `CMakeLists.txt` 的 `find_package` 与 `package.xml` 的依赖声明，漏声明即失败。见 `tools/check_deps.py` |
-| `core` | clang++ 与 g++ 两种编译器 × 普通 / ASan+UBSan 两种构建，共 4 个组合。`-Werror` 强制零警告，跑 151 项报文自检、64 项串口接收自检（PTY 虚拟串口）与 14 项串口压力自检（PTY 2 Mbps 灌入 3 s，掺垃圾与伪帧头、周期性读暂停）、\n28 项节点主循环自检（吞吐 / 单轮耗时分布 / 定界缓冲深度 / 超载丢弃与恢复），另编译探针确认可用 |
+| `core` | clang++ 与 g++ 两种编译器 × 普通 / ASan+UBSan 两种构建，共 4 个组合。`-Werror` 强制零警告，跑 202 项报文自检、64 项串口接收自检（PTY 虚拟串口）与 14 项串口压力自检（PTY 2 Mbps 灌入 3 s，掺垃圾与伪帧头、周期性读暂停）、\n28 项节点主循环自检（吞吐 / 单轮耗时分布 / 定界缓冲深度 / 超载丢弃与恢复），另编译探针确认可用 |
 | `udp-loopback` | 真实 UDP 回环集成测试，再叠 ASan/UBSan 跑一遍；并验证探针在收不到包时返回非 0 |
 | `ros` | 在官方 `ros:humble-ros-base` 容器里 `rosdep install --from-paths src --ignore-src -r -y` 后 `colcon build --packages-select unilidar_driver`，并确认节点/自检/探针产物可执行；再用越界 `local_port` 启动节点，确认参数校验会 FATAL 并以非 0 退出 |
 
 前三个 job 不需要 ROS：解析核心源码层面不出现 ROS 头文件，一条 `clang++` 命令加一次执行就能覆盖协议、解析、解码三层。`ros` job 专门补上「ROS 节点从未被编译验证」这块缺口——之前只有外部仓库的 CI 顺带编译过同一份代码，本仓库自己是不编译节点的。
 
-回环测试是 `udp_receiver.cpp` 唯一的自动化覆盖：151 项自检直接喂字节给解析器，不经过 socket，而缓冲、超时、来源地址只有真收发才能验证。测试资产在 `tests/`：
+回环测试是 `udp_receiver.cpp` 唯一的自动化覆盖：202 项自检直接喂字节给解析器，不经过 socket，而缓冲、超时、来源地址只有真收发才能验证。测试资产在 `tests/`：
 
 ```bash
 bash tests/udp_loopback_test.sh                                    # 普通构建
@@ -228,7 +228,7 @@ EXTRA_CXXFLAGS="-fsanitize=address,undefined -g" \
 | 项目 | 状态 |
 |---|---|
 | CRC32 算法 | 已对标准测试向量 `123456789` 校验（0xCBF43926） |
-| 报文定界、重同步、CRC 篡改、帧尾篡改、长度越界、重复/乱序序号 | 离线自检 151 项断言全过 |
+| 报文定界、重同步、CRC 篡改、帧尾篡改、长度越界、重复/乱序序号 | 离线自检 202 项断言全过 |
 | `serial_receiver`（串口接收）+ 解析器 | 离线自检 64 项断言全过（Linux；macOS 本机 63 项——`B2000000` 是 Linux 扩展常量，无它的平台跳过 2 Mbps 断言）：整帧直达、跨写拆包、垃圾与伪帧头重同步、无数据契约、一次多帧、IMU 帧、打开失败路径；CI 双编译器 × ASan 复跑 |
 | 串口 2 Mbps 满码率链路 | 压力自检 14 项断言全过：PTY 主端按 2 Mbps 灌 60 秒合成报文（实测灌入 126,636 帧 = 点云 113,972 + IMU 12,664，解出数完全相等），同时每秒边界注入 16 B 垃圾 + 12 B 伪帧头、每 2 秒一次 100 ms 读暂停制造瞬态背压；结果：`bad_crc 0 · bad_tail 0 · seq_gaps 0 · duplicates 0`，缓冲峰值 2,064 B，RSS 峰值 1.7 MB，实际速率 2.00 Mbps。本测试最先抓到 `packet_parser` 坏帧恢复路径的丢帧 bug（见 CHANGELOG） |
 | CRC32 覆盖范围 | 按**官方实现**核对：反汇编 `libunilidar_sdk2.a` 的 `LidarPacketParser::parseByte`，区间为 `[frame+12, frame+packet_size-12)`；并加了"CRC 含帧头必须被拒"的回归断言。官方协议头注释与实现不一致，**真机仍待确认** |
