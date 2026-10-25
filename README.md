@@ -208,7 +208,7 @@ unilidar-driver/
 
 前三个 job 不需要 ROS：解析核心源码层面不出现 ROS 头文件，一条 `clang++` 命令加一次执行就能覆盖协议、解析、解码三层。`ros` job 专门补上「ROS 节点从未被编译验证」这块缺口——之前只有外部仓库的 CI 顺带编译过同一份代码，本仓库自己是不编译节点的。
 
-`udp_receiver.cpp` 的覆盖由两部分组成：`udp-loopback` job 的回环脚本走真实 socket 的 happy path（能打开、能收到、能对来源地址过滤）；`core` job 的 38 项 UDP 接收自检补上其余全部分支——打开契约与 SO_RCVBUF/SO_RCVTIMEO 回读、非法 IP 与重复 bind 的失败路径、未打开即收、超时返回、close 幂等。202 项自检直接喂字节给解析器，不经过 socket。测试资产在 `tests/` 与 `examples/`：
+`udp_receiver.cpp` 的覆盖由两部分组成：`udp-loopback` job 的回环脚本走真实 socket 的 happy path（能打开、能收到、能对来源地址过滤）；`core` job 的 38 项 UDP 接收自检补上其余全部分支——打开契约与 SO_RCVBUF/SO_RCVTIMEO 回读、非法 IP 与 bind 非本机地址的失败路径、未打开即收、超时返回、close 幂等。202 项自检直接喂字节给解析器，不经过 socket。测试资产在 `tests/` 与 `examples/`：
 
 ```bash
 bash tests/udp_loopback_test.sh                                    # 普通构建
@@ -231,7 +231,7 @@ EXTRA_CXXFLAGS="-fsanitize=address,undefined -g" \
 | CRC32 算法 | 已对标准测试向量 `123456789` 校验（0xCBF43926） |
 | 报文定界、重同步、CRC 篡改、帧尾篡改、长度越界、重复/乱序序号 | 离线自检 202 项断言全过 |
 | `serial_receiver`（串口接收）+ 解析器 | 离线自检 81 项断言全过（Linux；macOS 本机 80 项——`B2000000` 是 Linux 扩展常量，无它的平台跳过 2 Mbps 断言）：整帧直达、跨写拆包、垃圾与伪帧头重同步、无数据契约、一次多帧、IMU 帧、打开失败路径（空设备名 / EACCES 提示加入 dialout 组）、设备拔出（PTY 主端关闭后两平台实测均为 EOF：读返回 0、err 空；真机 USB 串口拔出两平台都是错误返回，EOF 是 PTY 独有的仿真语义）、fd 失效后 readSome 走错误分支（返回 -1、err 点名设备）；CI 双编译器 × ASan 复跑 |
-| `udp_receiver`（UDP 接收） | 离线自检 38 项断言全过（回环 socket）：打开契约与 `SO_RCVBUF`/`SO_RCVTIMEO` 回读、非法 IP 与端口重复 bind 失败路径、未打开即收、超时返回 0 且不污染 err、close 幂等；与 `udp-loopback` job 的真实回环 happy path 互补 |
+| `udp_receiver`（UDP 接收） | 离线自检 38 项断言全过（回环 socket）：打开契约与 `SO_RCVBUF`/`SO_RCVTIMEO` 回读、非法 IP 与 bind 非本机地址失败路径、未打开即收、超时返回 0 且不污染 err、close 幂等；与 `udp-loopback` job 的真实回环 happy path 互补 |
 | 串口 2 Mbps 满码率链路 | 压力自检 14 项断言全过：PTY 主端按 2 Mbps 灌 60 秒合成报文（实测灌入 126,636 帧 = 点云 113,972 + IMU 12,664，解出数完全相等），同时每秒边界注入 16 B 垃圾 + 12 B 伪帧头、每 2 秒一次 100 ms 读暂停制造瞬态背压；结果：`bad_crc 0 · bad_tail 0 · seq_gaps 0 · duplicates 0`，缓冲峰值 2,064 B，RSS 峰值 1.7 MB，实际速率 2.00 Mbps。本测试最先抓到 `packet_parser` 坏帧恢复路径的丢帧 bug（见 CHANGELOG） |
 | CRC32 覆盖范围 | 按**官方实现**核对：反汇编 `libunilidar_sdk2.a` 的 `LidarPacketParser::parseByte`，区间为 `[frame+12, frame+packet_size-12)`；并加了"CRC 含帧头必须被拒"的回归断言。官方协议头注释与实现不一致，**真机仍待确认** |
 | 点云几何换算 | 退化标定下与解析解逐点比对（仰角 30° 时 z 应为 0.5） |
