@@ -57,7 +57,7 @@ jobs:
           # 开了 ASan 时顺便查泄漏；没开时这个变量被忽略
           ASAN_OPTIONS=detect_leaks=1 ./decoder_selftest
 
-      - name: 编译并运行 78 项串口接收自检（PTY 虚拟串口；macOS 无 B2000000 常量为 77 项）
+      - name: 编译并运行 81 项串口接收自检（PTY 虚拟串口；macOS 无 B2000000 常量为 80 项）
         run: |
           set -e
           EXTRA=""
