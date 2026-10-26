@@ -35,6 +35,9 @@ ROS2 驱动：默认经 CH340 USB 串口（`/dev/ttyUSB0`，2 Mbps）收报文�
 
 本仓库为纯软件驱动；与其配套的物理集成件（UniLiDAR L1 的转接与减振安装：12 V 供电、以太网 breakout、安装基准与减振）见 [`hardware/`](hardware/README.md)。更完整的硬件系统（执行层、电源、急停、传感器接口）见 [`active-suspension-lidar-preview` 的 hardware/](https://github.com/qi-neo/active-suspension-lidar-preview/tree/main/hardware)，本仓库不重复放控制/电源类硬件。
 
+接上真实雷达后要跑的**物理层误码率与长稳 bench**（`hardware_ber_bench`）、它的字段含义、
+判据与记录模板见 [`docs/ber-bench.md`](docs/ber-bench.md)。
+
 ## 快速开始
 
 ```bash
@@ -245,6 +248,7 @@ EXTRA_CXXFLAGS="-fsanitize=address,undefined -g" \
 | CMakeLists 与 package.xml 依赖一致 | CI 每次运行核对，漏声明即失败 |
 | **ROS 节点实机运行** | **未验证**，需接雷达后按探针流程核对 |
 | **接真实雷达** | **未验证**，需按探针流程核对 |
+| **CH340 物理层误码率与长稳** | **未验证（待硬件）**。`hardware_ber_bench` 已就绪（`--selftest` 7 项 CI 常跑），完整前置条件、字段判据与记录模板见 [`docs/ber-bench.md`](docs/ber-bench.md) |
 
 ## 协议来源与许可证
 
