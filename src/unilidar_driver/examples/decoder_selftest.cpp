@@ -7,7 +7,6 @@
 //     src/unilidar_driver/src/protocol.cpp
 //     src/unilidar_driver/src/packet_parser.cpp
 //     src/unilidar_driver/src/frame_decoder.cpp
-//     src/unilidar_driver/src/udp_receiver.cpp
 //     -o /tmp/decoder_selftest
 //   /tmp/decoder_selftest
 //
@@ -133,7 +132,7 @@ static void test_crc_and_layout() {
   check(kTailSize == 12, "帧尾 12 字节");
 
   // 官方注释给出的字节数（点云 1036 / IMU 156）与其自身字段实算值并不一致，
-  // 所以这里不断言某个具体长度，只保证自洽，数字交给 udp_probe 在真机上核对。
+  // 所以这里不断言某个具体长度，只保证自洽，数字交给真机核对。
   std::printf("     按字段实算：3D 点云整包 %zu 字节，IMU 整包 %zu 字节\n", kPointPacketSize,
               kImuPacketSize);
   check(kPointPacketSize == kHeaderSize + sizeof(LidarPointData) + kTailSize,
@@ -279,7 +278,7 @@ static void test_parser_basic() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. 数据分批到达（UDP 分片或串口流式）
+// 3. 数据分批到达（串口流式或分片到达）
 // ---------------------------------------------------------------------------
 static void test_streaming() {
   std::printf("[3] 流式：数据分批到达\n");

@@ -81,9 +81,6 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   src/unilidar_driver/src/packet_parser.cpp
       帧定界与重同步、CRC32 校验、序号连续性统计、缓冲上限保护
 
-  src/unilidar_driver/src/udp_receiver.cpp
-      POSIX UDP 收包封装、来源地址回填
-
   src/unilidar_driver/src/serial_receiver.cpp
       POSIX termios 串口接收封装（CH340 USB，2 Mbps）
 
@@ -97,9 +94,6 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
       81 项断言的串口接收自检（PTY 虚拟串口；macOS 为 80 项，
       B2000000 是 Linux 扩展常量）
 
-  src/unilidar_driver/examples/udp_receiver_selftest.cpp
-      38 项断言的 UDP 接收自检（回环 socket，覆盖失败路径）
-
   src/unilidar_driver/examples/serial_stress_selftest.cpp
       14 项断言的串口压力自检（PTY 2 Mbps 灌入）
 
@@ -107,13 +101,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
       65 项断言的节点主循环自检（实时性与背压）
 
   src/unilidar_driver/examples/selftest_fixture.hpp
-      上述串口/UDP 自检共用的测试基建（PTY、帧构造、边写边读）
-
-  src/unilidar_driver/examples/udp_probe.cpp
-      实测定界探针
-
-  tests/
-      UDP 回环集成测试与合成报文生成
+      上述串口自检共用的测试基建（PTY、帧构造、边写边读）
 
   docs/driver-design.md
       驱动编写方法论文档

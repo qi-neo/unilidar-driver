@@ -8,7 +8,18 @@
 对应 1.1.x。主线是"把协议里照注释抄来的假设换成对着官方实现核对过的结论"，
 并把收包路径的健壮性补齐：缓冲可配、序号异常可分辨、参数非法直接失败；
 再补上逐点 `time` / `ring`，为下游运动去畸变打基础；最后补上实物默认的
-串口接收路径（此前只有 UDP）。
+传输层收敛为串口（TTL UART）单路径。
+
+### 移除（传输层收敛为串口）
+
+UDP 接收路径已整体移除，驱动仅保留串口（TTL UART）路径：
+
+- 删除 `udp_receiver.{hpp,cpp}`、`examples/udp_probe.cpp`、`examples/udp_receiver_selftest.cpp`、
+  `tests/udp_loopback_test.sh`、`tests/send_synthetic_packets.py`；
+- 节点 `unilidar_driver_node.cpp` 重写为纯串口：`transport`/`local_ip`/`local_port`/`source_ip`/`recv_buf_bytes`
+  参数与对应诊断分支全部移除，仅在串口打开失败时给出排查顺序；
+- CMake / 配置 / launch / 包描述同步清理，CI 移除 `udp-loopback` job 与 38 项 UDP 自检；
+- 离线自检总数由 400 项收敛为 **362** 项（报文 202 + 串口 81 + 压力 14 + 节点主循环 65）。
 
 ### 测试（C1 覆盖率补齐）
 

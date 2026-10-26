@@ -130,7 +130,7 @@ bool SerialReceiver::open(const std::string& device, int baud, int read_timeout_
   }
 
   // O_NONBLOCK：open 本身不因对端（雷达）未就绪而挂住；随后的 read 也立即
-  // 返回，收多少算多少，与 UdpReceiver 的「0 = 当前无数据」契约一致。
+  // 返回，收多少算多少，与接收契约一致：返回 0 = 当前无数据。
   fd_ = ::open(device.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
   if (fd_ < 0) {
     err = "打开 " + device + " 失败: " + std::strerror(errno) +

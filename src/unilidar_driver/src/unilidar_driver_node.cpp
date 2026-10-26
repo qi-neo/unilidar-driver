@@ -1,11 +1,8 @@
 // Unitree L1 驱动节点：收报文 -> 解成点云与 IMU -> 发布成标准 ROS 话题。
 //
-// 传输层二选一（transport 参数）：
-//   serial —— 实物默认路径。L1 的原生通讯接口就是 TTL UART，官方 SDK 默认
-//             经 USB 转串口模块（CH340 类）以 2,000,000 bps 接入，设备名
-//             通常为 /dev/ttyUSB0；
-//   udp    —— 备选路径。L1 以太网口 192.168.1.62:6101 发往本机 6201。
-// 两条路径喂给 packet_parser 的都是无边界字节流，解析与发布完全共用。
+// 传输层：L1 的原生通讯接口就是 TTL UART，官方 SDK 默认经 USB 转串口模块
+// （CH340 类）以 2,000,000 bps 接入，设备名通常为 /dev/ttyUSB0。
+// 串口喂给 packet_parser 的是无边界字节流，解析与发布在核心库里完成。
 //
 // 本文件只做「参数、收包、发布」的接线，协议解析与几何换算都在 unilidar_driver
 // 核心库里，不依赖 ROS，可单独离线自检。
@@ -30,13 +27,10 @@
 #include "unilidar_driver/frame_decoder.hpp"
 #include "unilidar_driver/packet_parser.hpp"
 #include "unilidar_driver/serial_receiver.hpp"
-#include "unilidar_driver/udp_receiver.hpp"
 
 using namespace unilidar_driver;
 
 namespace {
-
-enum class Transport { kSerial, kUdp };
 
 double wallNowSec() {
   const auto now = std::chrono::system_clock::now();
@@ -69,23 +63,17 @@ private:
         [this](const std::vector<PointXYZIT>& pts, double stamp) { publishCloud(pts, stamp); },
         [this](const ImuSample& s) { publishImu(s); });
 
+    // 串口打开失败时把排查顺序在 FATAL 里一次说清，避免反复试错。
     std::string err;
-    if (transport_ == Transport::kSerial) {
-      if (!serial_rx_.open(serial_device_, serial_baud_, recv_timeout_ms_, err)) {
-        RCLCPP_FATAL(get_logger(), "串口打开失败：%s", err.c_str());
-        RCLCPP_FATAL(get_logger(),
-                     "排查顺序：1) ls %s 确认设备存在（CH340 类模块枚举为 ttyUSB*）；"
-                     "2) 把当前用户加入 dialout 组后重新登录：sudo usermod -a -G dialout $USER；"
-                     "3) 确认波特率 %d 是官方 SDK 默认值 2000000，换错会一个整帧都解不出；"
-                     "4) 确认 L1 的 UART 口接线（TX/RX 交叉、共地）。",
-                     serial_device_.c_str(), serial_baud_);
-        throw std::runtime_error("串口打开失败");
-      }
-    } else {
-      if (!rx_.open(local_port_, local_ip_, recv_timeout_ms_, recv_buf_bytes_, err)) {
-        RCLCPP_FATAL(get_logger(), "UDP 打开失败：%s", err.c_str());
-        throw std::runtime_error("UDP 打开失败");
-      }
+    if (!serial_rx_.open(serial_device_, serial_baud_, recv_timeout_ms_, err)) {
+      RCLCPP_FATAL(get_logger(), "串口打开失败：%s", err.c_str());
+      RCLCPP_FATAL(get_logger(),
+                   "排查顺序：1) ls %s 确认设备存在（CH340 类模块枚举为 ttyUSB*）；"
+                   "2) 把当前用户加入 dialout 组后重新登录：sudo usermod -a -G dialout $USER；"
+                   "3) 确认波特率 %d 是官方 SDK 默认值 2000000，换错会一个整帧都解不出；"
+                   "4) 确认 L1 的 UART 口接线（TX/RX 交叉、共地）。",
+                   serial_device_.c_str(), serial_baud_);
+      throw std::runtime_error("串口打开失败");
     }
 
     // 下游（v2 预瞄节点、v3 控制节点）都用 SensorDataQoS 订阅，即 BEST_EFFORT。
@@ -103,42 +91,25 @@ private:
     diag_timer_ = create_wall_timer(std::chrono::duration<double>(diag_period_s_),
                                     [this]() { logDiagnostics(); });
 
-    if (transport_ == Transport::kSerial) {
-      RCLCPP_INFO(get_logger(),
-                  "驱动就绪 | 串口 %s @ %d bps（L1 原生 TTL UART 经 CH340 类模块转 USB）| "
-                  "点云 %s(%s) 每 %d 条扫描合成一帧 | IMU %s(%s) 四元数顺序 %s",
-                  serial_device_.c_str(), serial_baud_, cloud_topic_.c_str(),
-                  cloud_frame_.c_str(), cloud_scan_num_, imu_topic_.c_str(), imu_frame_.c_str(),
-                  quat_order_str_.c_str());
-      // 低延迟是否生效值得单独报一行：它不是"能不能跑"的问题，而是
-      // "帧龄凭空多 16 ms"的问题，后者只影响预瞄精度、不会报错，
-      // 不注意就永远发现不了。
-      if (serial_rx_.lowLatencyEnabled()) {
-        RCLCPP_INFO(get_logger(), "串口低延迟已开启：%s",
-                    serial_rx_.lowLatencyNote().c_str());
-      } else {
-        RCLCPP_INFO(get_logger(),
-                    "串口低延迟未开启（%s）：CH340 默认攒批约 16 ms，"
-                    "开启后帧龄可再降约 15 ms；该属性不存在时属正常，不影响收发",
-                    serial_rx_.lowLatencyNote().empty()
-                        ? "设备或内核无 low_latency 属性"
-                        : serial_rx_.lowLatencyNote().c_str());
-      }
-      if (!source_ip_.empty()) {
-        RCLCPP_WARN(get_logger(),
-                    "transport=serial 时 source_ip 不生效（串口没有来源地址概念），已忽略。");
-      }
+    RCLCPP_INFO(get_logger(),
+                "驱动就绪 | 串口 %s @ %d bps（L1 原生 TTL UART 经 CH340 类模块转 USB）| "
+                "点云 %s(%s) 每 %d 条扫描合成一帧 | IMU %s(%s) 四元数顺序 %s",
+                serial_device_.c_str(), serial_baud_, cloud_topic_.c_str(),
+                cloud_frame_.c_str(), cloud_scan_num_, imu_topic_.c_str(), imu_frame_.c_str(),
+                quat_order_str_.c_str());
+    // 低延迟是否生效值得单独报一行：它不是"能不能跑"的问题，而是
+    // "帧龄凭空多 16 ms"的问题，后者只影响预瞄精度、不会报错，
+    // 不注意就永远发现不了。
+    if (serial_rx_.lowLatencyEnabled()) {
+      RCLCPP_INFO(get_logger(), "串口低延迟已开启：%s",
+                  serial_rx_.lowLatencyNote().c_str());
     } else {
       RCLCPP_INFO(get_logger(),
-                  "驱动就绪 | 监听 %s:%d | 点云 %s(%s) 每 %d 条扫描合成一帧 | IMU %s(%s) "
-                  "四元数顺序 %s",
-                  local_ip_.empty() ? "0.0.0.0" : local_ip_.c_str(), local_port_,
-                  cloud_topic_.c_str(), cloud_frame_.c_str(), cloud_scan_num_,
-                  imu_topic_.c_str(), imu_frame_.c_str(), quat_order_str_.c_str());
-      RCLCPP_INFO(get_logger(),
-                  "收包缓冲 SO_RCVBUF 请求 %d 字节，内核实际生效 %d 字节"
-                  "（Linux 会翻倍并受 net.core.rmem_max 裁剪）",
-                  recv_buf_bytes_, rx_.recvBufBytes());
+                  "串口低延迟未开启（%s）：CH340 默认攒批约 16 ms，"
+                  "开启后帧龄可再降约 15 ms；该属性不存在时属正常，不影响收发",
+                  serial_rx_.lowLatencyNote().empty()
+                      ? "设备或内核无 low_latency 属性"
+                      : serial_rx_.lowLatencyNote().c_str());
     }
   }
 
@@ -155,22 +126,9 @@ private:
   }
 
   void declareParams() {
-    // 传输层：serial 为实物默认路径（L1 原生 TTL UART 经 CH340 类模块转 USB，
-    // /dev/ttyUSB0 @ 2 Mbps）；udp 为以太网备选路径。
-    const std::string transport_str = declare_parameter<std::string>("transport", "serial");
-    if (transport_str == "serial") {
-      transport_ = Transport::kSerial;
-    } else if (transport_str == "udp") {
-      transport_ = Transport::kUdp;
-    } else {
-      fatalParam("transport=\"" + transport_str + "\"，只接受 serial 或 udp");
-    }
+    // 传输层：L1 原生 TTL UART 经 CH340 类模块转 USB，/dev/ttyUSB0 @ 2 Mbps。
     serial_device_ = declare_parameter<std::string>("serial_device", "/dev/ttyUSB0");
     serial_baud_ = declare_parameter<int>("serial_baud", 2000000);
-
-    local_ip_ = declare_parameter<std::string>("local_ip", "");
-    local_port_ = declare_parameter<int>("local_port", 6201);
-    source_ip_ = declare_parameter<std::string>("source_ip", "");
 
     cloud_frame_ = declare_parameter<std::string>("cloud_frame", "unilidar_lidar");
     cloud_topic_ = declare_parameter<std::string>("cloud_topic", "/unilidar/cloud");
@@ -190,21 +148,14 @@ private:
     poll_period_ms_ = declare_parameter<int>("poll_period_ms", 2);
     recv_timeout_ms_ = declare_parameter<int>("recv_timeout_ms", 1);
     diag_period_s_ = declare_parameter<double>("diag_period_s", 5.0);
-    // 雷达约 180 KB/s，内核默认 rmem（约 200 KB）在调度抖动时会溢出丢包。
-    // 0 表示不设置、沿用系统默认；默认请求 8 MiB。
-    recv_buf_bytes_ = declare_parameter<int>("recv_buf_bytes", kDefaultRecvBufBytes);
 
-    checkParam(local_port_ >= 1 && local_port_ <= 65535,
-               "local_port=" + std::to_string(local_port_) + "，应在 1..65535 之间");
-    if (transport_ == Transport::kSerial) {
-      checkParam(!serial_device_.empty(), "serial_device 不能为空（transport=serial 时必填）");
-      checkParam(serial_baud_ > 0, "serial_baud=" + std::to_string(serial_baud_) + "，应 > 0");
-      // 波特率是否可配置取决于平台 termios 常量表，提前问出来，
-      // 否则错误只会在 open 里以「不支持」暴露，排障时离现场远。
-      checkParam(serialBaudSupported(serial_baud_),
-                 "serial_baud=" + std::to_string(serial_baud_) +
-                     "，本平台 termios 无对应常量（L1 官方 SDK 默认 2000000）");
-    }
+    checkParam(!serial_device_.empty(), "serial_device 不能为空");
+    checkParam(serial_baud_ > 0, "serial_baud=" + std::to_string(serial_baud_) + "，应 > 0");
+    // 波特率是否可配置取决于平台 termios 常量表，提前问出来，
+    // 否则错误只会在 open 里以「不支持」暴露，排障时离现场远。
+    checkParam(serialBaudSupported(serial_baud_),
+               "serial_baud=" + std::to_string(serial_baud_) +
+                   "，本平台 termios 无对应常量（L1 官方 SDK 默认 2000000）");
     checkParam(quat_order_str_ == "wxyz" || quat_order_str_ == "xyzw",
                "quaternion_order=\"" + quat_order_str_ + "\"，只接受 wxyz 或 xyzw");
     checkParam(cloud_scan_num_ >= 1 && cloud_scan_num_ <= 65535,
@@ -215,8 +166,6 @@ private:
     checkParam(range_min_ < range_max_,
                "range_min=" + std::to_string(range_min_) + " 应小于 range_max=" +
                    std::to_string(range_max_));
-    checkParam(recv_buf_bytes_ >= 0,
-               "recv_buf_bytes=" + std::to_string(recv_buf_bytes_) + "，应 >= 0（0 表示用系统默认）");
 
     params_.quat_order = (quat_order_str_ == "xyzw") ? QuatOrder::kXyzw : QuatOrder::kWxyz;
     params_.use_system_timestamp = use_system_timestamp_;
@@ -264,19 +213,7 @@ private:
   void pollOnce() {
     std::string err;
     auto read = [this](std::uint8_t* buf, std::size_t cap, std::string& e) -> int {
-      std::string src;
-      int n = 0;
-      if (transport_ == Transport::kSerial) {
-        n = serial_rx_.readSome(buf, cap, e);
-      } else {
-        n = rx_.receive(buf, cap, e, &src);
-      }
-      // 指定了来源 IP 时只认那台雷达，避免别人的点云混进控制环（仅 UDP 有意义）
-      if (n > 0 && transport_ == Transport::kUdp && !source_ip_.empty() && src != source_ip_) {
-        filtered_++;
-        return 0;  // 当作"本轮没有更多数据"，继续下一轮
-      }
-      return n;
+      return serial_rx_.readSome(buf, cap, e);
     };
     loop_->pollOnce(read, wallNowSec(), &err);
     if (!err.empty()) RCLCPP_ERROR(get_logger(), "%s", err.c_str());
@@ -399,66 +336,32 @@ private:
                 static_cast<unsigned long>(ps.buffer_overflow),
                 static_cast<unsigned long>(ls.read_capped_polls),
                 static_cast<unsigned long>(ls.read_errors));
-    if (transport_ == Transport::kUdp) {
-      RCLCPP_INFO(get_logger(), "UDP 收包缓冲 SO_RCVBUF 实际生效 %d 字节（请求 recv_buf_bytes=%d）",
-                  rx_.recvBufBytes(), recv_buf_bytes_);
-    }
-    if (filtered_ > 0) {
-      RCLCPP_INFO(get_logger(), "已丢弃来自非指定来源的数据 %lu 条",
-                  static_cast<unsigned long>(filtered_));
-    }
-
     // 累计值每轮都打印，告警只看「新增」缺口，避免刷屏。
     if (ps.seq_gaps > last_seq_gaps_) {
-      if (transport_ == Transport::kUdp) {
-        RCLCPP_WARN(get_logger(),
-                    "本周期新增序号缺口 %lu（累计 %lu）：可能正在丢包。优先确认收包缓冲是否够大——"
-                    "当前 SO_RCVBUF 实际生效 %d 字节（请求 recv_buf_bytes=%d），"
-                    "可调大到 16 MiB / 32 MiB 后重启；其次检查 poll_period_ms 是否被调度延迟、"
-                    "本机 CPU 是否过载。若缺口只在启动瞬间出现一次，通常是进程启动晚于雷达。",
-                    static_cast<unsigned long>(ps.seq_gaps - last_seq_gaps_),
-                    static_cast<unsigned long>(ps.seq_gaps), rx_.recvBufBytes(), recv_buf_bytes_);
-      } else {
-        RCLCPP_WARN(get_logger(),
-                    "本周期新增序号缺口 %lu（累计 %lu）：可能正在丢包。串口路径优先确认："
-                    "1) 波特率是否为 2000000（L1 官方 SDK 默认），错配会持续 CRC 失败与缺口；"
-                    "2) USB 线缆/转接模块质量，2 Mbps 下劣质线会丢字节；"
-                    "3) poll_period_ms=%d 是否被调度延迟、本机 CPU 是否过载。"
-                    "若缺口只在启动瞬间出现一次，通常是进程启动晚于雷达。",
-                    static_cast<unsigned long>(ps.seq_gaps - last_seq_gaps_),
-                    static_cast<unsigned long>(ps.seq_gaps), poll_period_ms_);
-      }
+      RCLCPP_WARN(get_logger(),
+                  "本周期新增序号缺口 %lu（累计 %lu）：可能正在丢包。串口路径优先确认："
+                  "1) 波特率是否为 2000000（L1 官方 SDK 默认），错配会持续 CRC 失败与缺口；"
+                  "2) USB 线缆/转接模块质量，2 Mbps 下劣质线会丢字节；"
+                  "3) poll_period_ms=%d 是否被调度延迟、本机 CPU 是否过载。"
+                  "若缺口只在启动瞬间出现一次，通常是进程启动晚于雷达。",
+                  static_cast<unsigned long>(ps.seq_gaps - last_seq_gaps_),
+                  static_cast<unsigned long>(ps.seq_gaps), poll_period_ms_);
       last_seq_gaps_ = ps.seq_gaps;
     }
 
     if (ps.frames_ok == 0 && ps.bad_crc + ps.bad_size + ps.bad_tail > 0) {
-      if (transport_ == Transport::kUdp) {
-        RCLCPP_WARN(get_logger(),
-                    "一帧都没解出却不乏错误计数：先看 bad_crc 是否在涨——若持续在涨而 bad_tail "
-                    "很少，最常见的是 CRC 覆盖范围与本固件不一致（官方实现只覆盖数据段）；"
-                    "否则通常是 IP/端口不对，或对面根本不是宇树雷达。"
-                    "可用 udp_probe 工具先看原始包的实际长度与 CRC 情况。");
-      } else {
-        RCLCPP_WARN(get_logger(),
-                    "一帧都没解出却不乏错误计数：先看 bad_crc 是否在涨——串口路径最常见的原因是"
-                    "波特率不是 2000000 或线序/共地有问题（错一个字节后续帧全部 CRC 失败）；"
-                    "其次确认对面真的是 L1（TX/RX 是否交叉）。可用 serial_receiver_selftest "
-                    "先验证本机 PTY 上的定界逻辑。");
-      }
+      RCLCPP_WARN(get_logger(),
+                  "一帧都没解出却不乏错误计数：先看 bad_crc 是否在涨——串口路径最常见的原因是"
+                  "波特率不是 2000000 或线序/共地有问题（错一个字节后续帧全部 CRC 失败）；"
+                  "其次确认对面真的是 L1（TX/RX 是否交叉）。可用 serial_receiver_selftest "
+                  "先验证本机 PTY 上的定界逻辑。");
     }
     if (ds.size_hint > 0) {
-      if (transport_ == Transport::kUdp) {
-        RCLCPP_WARN(get_logger(),
-                    "整包长度与本驱动预期不同（累计 %lu 次）。若点云形状明显不对，"
-                    "请把 udp_probe 报告的实际长度反馈回来核对固件版本。",
-                    static_cast<unsigned long>(ds.size_hint));
-      } else {
-        RCLCPP_WARN(get_logger(),
-                    "整包长度与本驱动预期不同（累计 %lu 次）。若点云形状明显不对，"
-                    "请记录串口实际收到的整包长度反馈回来核对固件版本"
-                    "（可用 od 抓包或临时加打印统计）。",
-                    static_cast<unsigned long>(ds.size_hint));
-      }
+      RCLCPP_WARN(get_logger(),
+                  "整包长度与本驱动预期不同（累计 %lu 次）。若点云形状明显不对，"
+                  "请记录串口实际收到的整包长度反馈回来核对固件版本"
+                  "（可用 od 抓包或临时加打印统计）。",
+                  static_cast<unsigned long>(ds.size_hint));
     }
     // time_increment 是逐点时间唯一的来源；它无效时 time 偏移全为 0，
     // 去畸变会算成"整条线同一时刻"，必须让用户看见。
@@ -471,13 +374,9 @@ private:
     }
   }
 
-  Transport transport_{Transport::kSerial};
   std::string serial_device_;
   int serial_baud_{2000000};
 
-  std::string local_ip_;
-  int local_port_{6201};
-  std::string source_ip_;
   std::string cloud_frame_;
   std::string cloud_topic_;
   std::string imu_frame_;
@@ -490,7 +389,6 @@ private:
   bool publish_tf_{true};
   int poll_period_ms_{2};
   int recv_timeout_ms_{1};
-  int recv_buf_bytes_{kDefaultRecvBufBytes};
   double diag_period_s_{5.0};
 
   DecodeParams params_;
@@ -498,8 +396,7 @@ private:
   // 塞进去。实时性与背压因此可以在没有 ROS、没有雷达的机器上离线实测，
   // 节点与自检跑的是同一份循环代码。
   std::unique_ptr<DriverLoop> loop_;
-  SerialReceiver serial_rx_;  // transport=serial 时使用
-  UdpReceiver rx_;           // transport=udp 时使用
+  SerialReceiver serial_rx_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_pub_;
   rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_;
   std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
@@ -507,7 +404,6 @@ private:
   rclcpp::TimerBase::SharedPtr poll_timer_;
   rclcpp::TimerBase::SharedPtr diag_timer_;
 
-  std::uint64_t filtered_{0};
   std::uint64_t last_seq_gaps_{0};  // 上一轮诊断时的 seq_gaps，用于只报新增缺口
   bool warned_time_increment_{false};  // time_increment 无效只告警一次，避免刷屏
 };

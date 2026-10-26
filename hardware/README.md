@@ -1,6 +1,6 @@
 # 硬件集成 / Hardware Integration
 
-`unilidar-driver` 本身是**纯软件仓库**（宇树 L1 激光雷达的 ROS2 驱动，自研 UDP 协议解析，不链接官方静态库）。这里只放与驱动配套的**物理集成件**说明——L1 的转接与减振安装。
+`unilidar-driver` 本身是**纯软件仓库**（宇树 L1 激光雷达的 ROS2 驱动，自研串口（TTL UART）协议解析，不链接官方静态库）。这里只放与驱动配套的**物理集成件**说明——L1 的转接与减振安装。
 
 > 状态：设计文档。更完整的硬件系统设计（执行层、电源、急停）见 [`active-suspension-lidar-preview` 的 hardware/](https://github.com/qi-neo/active-suspension-lidar-preview/tree/main/hardware)，本仓库不重复放控制/电源类硬件。
 
@@ -15,7 +15,7 @@
 
 ### 2. 数据接口
 
-- L1 通过**以太网**输出点云（本驱动走 UDP 解析）。板子做 RJ45 或端子 breakout，直连 香橙派/计算平台网口；若 L1 用非标准连接器，做小转接板。
+- L1 通过 **TTL UART** 输出点云（本驱动走串口解析）。官方手册标注通讯接口为 TTL UART（4PIN 3.3 V：VCC / GND / RX / TX），默认经 CH340 类 USB 转串口模块接入；板子做 USB 转串口 breakout 直连 香橙派/计算平台 USB 口，或保留 TTL 端子做小转接板。
 - 网络线用屏蔽双绞，屏蔽层在板端单点接屏蔽地。
 
 ### 3. 机械安装（关键）

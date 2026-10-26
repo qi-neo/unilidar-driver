@@ -46,7 +46,7 @@ struct LoopStats {
 
 class DriverLoop {
  public:
-  // 与 SerialReceiver::readSome / UdpReceiver::receive 同契约：
+  // 与 SerialReceiver::readSome 同契约：
   // 返回 >0 为读到的字节数，0 = 当前无数据，-1 = 出错（错误串写到第三个参数）。
   using ReadFn = std::function<int(std::uint8_t*, std::size_t, std::string&)>;
   using CloudSink = std::function<void(const std::vector<PointXYZIT>&, double stamp)>;

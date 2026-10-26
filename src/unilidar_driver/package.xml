@@ -4,7 +4,7 @@
   <name>unilidar_driver</name>
   <version>1.0.1</version>
   <description>
-    Unitree L1 激光雷达驱动：自行实现 UDP 报文解析，发布标准 PointCloud2 与
+    Unitree L1 激光雷达驱动：自行实现串口（TTL UART）报文解析，发布标准 PointCloud2 与
     Imu 话题，不链接官方静态库。协议字段与几何公式依据官方 BSD-3-Clause 开源
     头文件重述。解析核心不依赖 ROS，可离线自检。
   </description>
