@@ -436,6 +436,25 @@ CH340 类 USB 转串口默认把收到的字节攒一批再上报，缓冲延迟
 **未在板端实测**：`low_latency` 的 sysfs 写入路径未在真实 CH340 + 香橙派上
 执行过（开发机是 macOS，走的是 `#ifdef __linux__` 的 else 分支）。
 
+### 主循环热路径：消除重复分配与样本无界增长
+
+三处都在每秒 180 次以上的路径上，此前每次都重新分配：
+
+- **`poll_ns_` 只 push 不清**（真实缺陷）：500 Hz 轮询下跑一天是 4320 万个
+  样本（约 345 MB），而 `pollNsQuantile()` 每次调用还要完整拷贝并排序整个
+  vector——跑久了诊断日志本身会变成秒级卡顿，内存也单调增长。改为封顶
+  `kMaxPollSamples = 4096` 后环形覆盖，vector 容量不再增长
+- **`drainFrames` / `handleCloud` 各自声明局部 vector**：每帧（180 线/s）
+  都重新分配 1 KB 级缓冲。提为成员 `frame_buf_` / `pts_buf_`，容量只增长一次
+- **`pending_` 靠 18 次 `insert` 增长**：每次触发 realloc + 全量 memcpy
+  （最终 130 KB）。构造时按 `cloud_scan_num × kMaxPoints3D` 一次预留
+
+新增 `DriverLoop::pollSampleCount()` 供自检断言封顶行为。
+
+验证：`node_loop_selftest` 65 → **71 项**（新增 [5] 段：灌 4596 轮断言样本
+稳定封顶 4096、轮询计数不受影响、封顶后中位数与 p99 仍可查、`resetStats()`
+后游标复位并可重新累积）；`decoder_selftest` 202 项同步复跑全过。
+
 ## [1.0.1] - 2026-10-14
 
 依赖修复版本。**若你用的是 1.0.0，请直接换到本版本**——1.0.0 的
