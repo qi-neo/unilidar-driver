@@ -409,6 +409,33 @@ read 返回 0 而非 EAGAIN（`VMIN=0/VTIME=0` 下的固有限定，`readSome` �
   误码待实测：诊断日志里 `CRC` 计数持续为 0 即通过；若持续增长，先换
   线/换模块/缩短线长，再怀疑固件 CRC 规则（后者已有对应的排障流程）。
 
+### 串口低延迟与构建默认 Release
+
+CH340 类 USB 转串口默认把收到的字节攒一批再上报，缓冲延迟约 16 ms。
+对预瞄类下游这 16 ms 是纯白送的——2 m/s 车速下等于 32 mm 的路面定位误差，
+而且它不报任何错，不注意就永远发现不了。
+
+- `SerialReceiver::open()` 成功后尝试写
+  `/sys/bus/usb-serial/devices/<tty>/low_latency = 1`；属性不存在（板载
+  UART、老内核、经 by-id 传入的长设备名）属常态，静默跳过，不影响收发
+- 不能走 `TIOCSSERIAL` + `ASYNC_LOW_LATENCY`：那是 8250 平台串口的标志，
+  usb-serial 驱动不读它，设了不生效
+- 新增 `lowLatencyEnabled()` / `lowLatencyNote()`，节点启动日志单独报一行。
+  这是「精度问题」而非「能不能跑」的问题，不主动报就永远发现不了
+
+构建侧补上显式默认值：`colcon build` 不带 `--cmake-args` 时
+`CMAKE_BUILD_TYPE` 为空，CMake 按「无优化标志」编译（等同 `-O0`），
+而本包的报文解析与 CRC 校验在 `-O0` 与 `-O3` 之间差数倍。现在未指定时
+默认 `Release`（命令行仍可覆盖），`-mcpu=cortex-a55` 限定 Linux + aarch64
+（AppleClang 也接受该取值，但为 Apple Silicon 按 A55 调度模型编译是错的）。
+
+验证：`decoder_selftest` 202 项、`serial_receiver_selftest` 80 项（Linux 81）、
+`serial_stress_selftest` 14 项（2 Mbps 灌入 6332 帧零丢失、缓冲峰值 2056 B）
+全部通过。
+
+**未在板端实测**：`low_latency` 的 sysfs 写入路径未在真实 CH340 + 香橙派上
+执行过（开发机是 macOS，走的是 `#ifdef __linux__` 的 else 分支）。
+
 ## [1.0.1] - 2026-10-14
 
 依赖修复版本。**若你用的是 1.0.0，请直接换到本版本**——1.0.0 的
