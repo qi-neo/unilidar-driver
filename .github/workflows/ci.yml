@@ -52,7 +52,6 @@ jobs:
             src/unilidar_driver/src/protocol.cpp \
             src/unilidar_driver/src/packet_parser.cpp \
             src/unilidar_driver/src/frame_decoder.cpp \
-            src/unilidar_driver/src/udp_receiver.cpp \
             -o decoder_selftest
           # 开了 ASan 时顺便查泄漏；没开时这个变量被忽略
           ASAN_OPTIONS=detect_leaks=1 ./decoder_selftest
@@ -74,28 +73,6 @@ jobs:
             src/unilidar_driver/src/serial_receiver.cpp \
             -o serial_receiver_selftest
           ASAN_OPTIONS=detect_leaks=1 ./serial_receiver_selftest
-
-      # UdpReceiver 与 SerialReceiver 同为传输层：udp-loopback job 的
-      # 回环脚本只覆盖 happy path（能打开、能收到），socket() 失败、
-      # 非法 IP、重复 bind、未打开即收、SO_RCVBUF/SO_RCVTIMEO 回读、
-      # close 幂等等失败与边界路径全部在这里补上，与 udp-loopback 互为补充。
-      # 端口默认 46311（与 udp-loopback job 的 46201 不冲突），
-      # 可用 UDP_SELFTEST_PORT 覆盖。
-      - name: 编译并运行 38 项 UDP 接收自检（回环 socket）
-        run: |
-          set -e
-          EXTRA=""
-          if [ "${{ matrix.sanitizer }}" = "asan" ]; then
-            EXTRA="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
-          fi
-          ${{ matrix.cxx }} -std=c++17 -Wall -Wextra -Wpedantic -Werror -O1 $EXTRA \
-            -I src/unilidar_driver/include \
-            src/unilidar_driver/examples/udp_receiver_selftest.cpp \
-            src/unilidar_driver/src/protocol.cpp \
-            src/unilidar_driver/src/packet_parser.cpp \
-            src/unilidar_driver/src/udp_receiver.cpp \
-            -o udp_receiver_selftest
-          ASAN_OPTIONS=detect_leaks=1 ./udp_receiver_selftest
 
       # 压力自检把「CH340 需实测」缩小到只剩物理层误码率：PTY 主端按 2 Mbps
       # 灌 60 秒合成报文（本 CI 取 3 秒），同时掺垃圾字节与伪帧头、周期性读
@@ -176,44 +153,10 @@ jobs:
             -o quat_check_selftest
           ASAN_OPTIONS=detect_leaks=1 ./quat_check_selftest
 
-      - name: 编译探针并确认可用
-        run: |
-          set -e
-          EXTRA=""
-          if [ "${{ matrix.sanitizer }}" = "asan" ]; then
-            EXTRA="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
-          fi
-          ${{ matrix.cxx }} -std=c++17 -Wall -Wextra -Wpedantic -Werror -O1 $EXTRA \
-            -I src/unilidar_driver/include \
-            src/unilidar_driver/examples/udp_probe.cpp \
-            src/unilidar_driver/src/protocol.cpp \
-            src/unilidar_driver/src/packet_parser.cpp \
-            src/unilidar_driver/src/udp_receiver.cpp \
-            -o udp_probe
-          ./udp_probe --help > /dev/null
-
-  udp-loopback:
-    name: UDP 回环集成测试
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      # decoder_selftest 直接喂字节给解析器，不经过 socket；
-      # udp_receiver.cpp 只有这一处覆盖。
-      - name: 回环测试
-        run: bash tests/udp_loopback_test.sh
-
-      # 同一套用例再叠 ASan/UBSan 跑一遍，给 socket 收包路径加内存安全覆盖
-      - name: 回环测试（ASan/UBSan）
-        run: |
-          EXTRA_CXXFLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
-            ASAN_OPTIONS=detect_leaks=1 \
-            bash tests/udp_loopback_test.sh
-
   ros:
     name: ROS 节点编译（Humble 容器）
     runs-on: ubuntu-latest
-    # 上面三个 job 只编译不依赖 ROS 的核心库，ROS 节点从未进过 CI：
+    # 上面两个 job 只编译不依赖 ROS 的核心库，ROS 节点从未进过 CI：
     # rclcpp API 用错、package.xml 漏依赖、CMake 链接问题都只能在用户机器上暴露。
     # 这里用官方 Humble 基础镜像真正 colcon build 一遍节点。
     container:
@@ -257,15 +200,13 @@ jobs:
           BIN=install/unilidar_driver/lib/unilidar_driver
           test -x "$BIN/unilidar_driver_node"
           test -x "$BIN/decoder_selftest"
-          test -x "$BIN/udp_probe"
           test -x "$BIN/serial_receiver_selftest"
           test -x "$BIN/serial_stress_selftest"
           test -x "$BIN/node_loop_selftest"
           test -x "$BIN/quat_check_selftest"
           test -x "$BIN/quat_check"
-          # 装出来的自检与探针也能跑，确认没有链接问题
+          # 装出来的自检也能跑，确认没有链接问题
           "$BIN/decoder_selftest"
-          "$BIN/udp_probe" --help > /dev/null
           # 串口自检用 PTY 虚拟串口，容器里同样可跑
           "$BIN/serial_receiver_selftest"
           # 压力自检取 3 秒，容器里灌入速率同样跑得满 2 Mbps
@@ -275,31 +216,15 @@ jobs:
           # B2 四元数判定自检（ROS-free 判定逻辑，ROS 节点已一并编译）
           "$BIN/quat_check_selftest"
 
-          # 参数校验要 FATAL 后以非 0 退出，而不是静默回退：用越界端口启动节点，
-          # 期望进程失败且日志里出现「参数非法」。这条同时验证了节点能真正跑起来。
+          # 参数校验要 FATAL 后以非 0 退出，而不是静默回退：用非法 quaternion_order
+          # 启动节点，期望进程失败且日志里出现「参数非法」。这条同时验证了节点能真正跑起来。
           set +e
-          OUT=$(timeout 20 "$BIN/unilidar_driver_node" --ros-args -p local_port:=70000 2>&1)
+          OUT=$(timeout 20 "$BIN/unilidar_driver_node" --ros-args -p quaternion_order:=illegal 2>&1)
           RC=$?
           set -e
           printf '%s\n' "$OUT"
           if [ "$RC" -eq 0 ]; then
-            echo "参数校验未生效：local_port=70000 时节点仍以退出码 0 结束"
-            exit 1
-          fi
-          if ! printf '%s' "$OUT" | grep -q "参数非法"; then
-            echo "节点非 0 退出，但不是因为参数校验失败（日志中没有『参数非法』）"
-            exit 1
-          fi
-
-          # 传输层参数同样要走校验：不认识的 transport 必须 FATAL 退出，
-          # 不能静默回退到某一条路径（用户会以为配置生效了）。
-          set +e
-          OUT=$(timeout 20 "$BIN/unilidar_driver_node" --ros-args -p transport:=carrier_pigeon 2>&1)
-          RC=$?
-          set -e
-          printf '%s\n' "$OUT"
-          if [ "$RC" -eq 0 ]; then
-            echo "参数校验未生效：transport=carrier_pigeon 时节点仍以退出码 0 结束"
+            echo "参数校验未生效：quaternion_order=illegal 时节点仍以退出码 0 结束"
             exit 1
           fi
           if ! printf '%s' "$OUT" | grep -q "参数非法"; then

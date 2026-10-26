@@ -43,7 +43,6 @@ add_library(unilidar_driver_core STATIC
   src/protocol.cpp
   src/packet_parser.cpp
   src/frame_decoder.cpp
-  src/udp_receiver.cpp
   src/serial_receiver.cpp
   src/driver_loop.cpp
 )
@@ -56,10 +55,6 @@ target_include_directories(unilidar_driver_core PUBLIC
 # 离线自检：断言之上的回归手段，不需要雷达也不需要网络
 add_executable(decoder_selftest examples/decoder_selftest.cpp)
 target_link_libraries(decoder_selftest unilidar_driver_core)
-
-# 实测定界探针：在目标机上核对真实包长与 CRC 是否成立
-add_executable(udp_probe examples/udp_probe.cpp)
-target_link_libraries(udp_probe unilidar_driver_core)
 
 # 串口接收自检：PTY 主从对模拟虚拟串口，不需要真雷达也不需要真串口
 add_executable(serial_receiver_selftest examples/serial_receiver_selftest.cpp)
@@ -80,12 +75,6 @@ target_link_libraries(node_loop_selftest unilidar_driver_core)
 # --selftest 模式不碰硬件，用合成流验证解析链路计数与报告生成（CI 离线回归）
 add_executable(hardware_ber_bench examples/hardware_ber_bench.cpp)
 target_link_libraries(hardware_ber_bench unilidar_driver_core)
-
-# UDP 接收自检：收发两端都建在本机回环上，覆盖 UdpReceiver 的每条分支
-# （打开契约、IP 配错、bind 非本机地址、未打开即收、src_ip 回显、超时契约）。
-# 端口默认 46311，可用 UDP_SELFTEST_PORT 覆盖
-add_executable(udp_receiver_selftest examples/udp_receiver_selftest.cpp)
-target_link_libraries(udp_receiver_selftest unilidar_driver_core)
 
 # 四元数一键判定：订阅 /unilidar/imu，60 秒窗口统计判定 xyzw/wxyz 约定
 # （B2 项）。quat_check_selftest 是 ROS-free 的判定逻辑离线自检；
@@ -110,11 +99,9 @@ ament_target_dependencies(quat_check
 install(TARGETS
   unilidar_driver_node
   decoder_selftest
-  udp_probe
   serial_receiver_selftest
   serial_stress_selftest
   node_loop_selftest
-  udp_receiver_selftest
   hardware_ber_bench
   quat_check_selftest
   quat_check
